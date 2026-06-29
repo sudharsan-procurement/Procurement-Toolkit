@@ -2,21 +2,34 @@
 AI provider abstraction for quote analysis.
 
 The rest of the app never talks to a specific AI engine directly — it asks an
-`AIProvider` to (a) read a quote's text into structured fields and (b) optionally
-narrate a recommendation. Swapping the brain (no-LLM → Ollama → a cloud model
-later) needs no change to the business logic in quote_intelligence.py.
+`AIProvider` to (a) read a quote's text into structured fields, (b) optionally
+narrate a recommendation, and (c) optionally produce a holistic reasoned
+comparison. Swapping the brain needs no change to the business logic in
+quote_intelligence.py.
 
-Providers shipped now:
-    LocalHeuristicProvider  - no LLM, pure rules/regex. Runs anywhere, including
-                              the free Streamlit Cloud host. This is the default.
-    OllamaProvider          - talks to a local Ollama server (http://localhost:11434)
-                              if one is running (e.g. on the user's own PC). Gives
-                              real LLM reasoning. Never used on the free cloud host
-                              because Ollama can't run there.
+Providers
+---------
+    LocalHeuristicProvider  - no LLM, pure rules/regex. Runs anywhere (incl. a
+                              locked-down corporate laptop and the free cloud
+                              host). Always available; the safety net.
+    OllamaProvider          - a *local* LLM via http://localhost:11434, IF the
+                              user happens to have Ollama running. OPTIONAL — the
+                              app no longer depends on it.
+    GeminiProvider          - Google Gemini over the public REST API. The primary
+                              non-local AI option: needs only an API key and
+                              outbound HTTPS, so it works without admin rights or
+                              any local install. This is what makes cloud AI the
+                              fallback when Ollama isn't there.
+    OpenAIProvider          - placeholder (subclasses the LLM base; wire up later).
+    ClaudeProvider          - placeholder (subclasses the LLM base; wire up later).
 
-get_provider() auto-detects: Ollama if reachable, else the heuristic engine.
+resolve_provider(settings) picks the right one from the user's saved settings and
+returns it together with a human-readable status (the ✓/⚠ indicator the UI shows)
+and any fallback message ("Ollama not available, switching to Gemini…").
 
-Future: OpenAIProvider / ClaudeProvider would subclass AIProvider the same way.
+All LLM providers share the same prompts and JSON parsing (the module-level
+build_* / parse_* helpers), so each concrete provider only has to implement how
+it sends a prompt and gets text back (`_chat`) — that's the future-proof seam.
 """
 
 from __future__ import annotations
@@ -24,6 +37,9 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+from .settings import get_api_key, load_settings
 
 # The fields we try to pull out of every quotation.
 QUOTE_FIELDS = [
@@ -32,14 +48,19 @@ QUOTE_FIELDS = [
     "Freight / Transport", "Total Value", "Additional Terms",
 ]
 
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
+
 
 class AIProvider(ABC):
     """Interface every AI backend implements."""
 
     name = "base"
+    # True for cloud providers (text leaves the machine); drives privacy notices.
+    is_cloud = False
 
     @abstractmethod
     def available(self) -> bool:
+        """Cheap, no-network-cost check that this provider *could* be used."""
         ...
 
     @abstractmethod
@@ -60,6 +81,15 @@ class AIProvider(ABC):
         quotation (goods, hotels, services), not just the fixed field schema.
         """
         return ""
+
+    def test_connection(self) -> tuple[bool, str]:
+        """Actively verify the provider works (used by the Settings page).
+
+        Returns (ok, message). Default: report availability without a live call.
+        """
+        if self.available():
+            return True, f"{self.name} is available."
+        return False, f"{self.name} is not available."
 
 
 # --- Heuristic (no-LLM) provider ---------------------------------------------
@@ -171,13 +201,123 @@ class LocalHeuristicProvider(AIProvider):
         return heuristic_extract(text, items_df, vendor_hint)
 
 
+# --- Shared LLM prompt building + parsing -------------------------------------
+# These are deliberately provider-agnostic: every LLM backend (Ollama, Gemini,
+# and the future OpenAI/Claude) uses the exact same prompts and parsing, so they
+# behave identically and there's only one place to tune the procurement prompts.
+
+def build_extract_prompt(text: str) -> str:
+    return (
+        "You are a procurement analyst. Extract these fields from the vendor "
+        "quotation text and return ONLY JSON with these exact keys: "
+        + ", ".join(f'"{f}"' for f in QUOTE_FIELDS)
+        + '. For each key use an object {"value": <string or null>, '
+        '"confidence": <0..1>}. If a field is absent, value null and '
+        "confidence 0.\n\nQUOTATION TEXT:\n" + (text or "")[:6000]
+    )
+
+
+def parse_extract_json(raw: str) -> dict:
+    """Turn an LLM's JSON reply into the {field: {value, confidence}} schema.
+
+    Tolerates ```json fences and missing keys. Raises on unparseable input so the
+    caller can fall back to heuristics.
+    """
+    data = json.loads(_strip_json_fence(raw))
+    result = {}
+    for f in QUOTE_FIELDS:
+        cell = data.get(f) or {}
+        if isinstance(cell, dict):
+            result[f] = {"value": cell.get("value"),
+                         "confidence": float(cell.get("confidence") or 0.0)}
+        else:
+            result[f] = {"value": cell, "confidence": 0.8 if cell else 0.0}
+    return result
+
+
+def build_recommend_prompt(context: str) -> str:
+    return (
+        "You are a procurement advisor. Based on the structured comparison below, "
+        "write a concise, professional recommendation (5-8 sentences) for a "
+        "procurement committee. Avoid jargon.\n\n" + context
+    )
+
+
+def build_reason_prompt(quotes: list[tuple]) -> str:
+    blocks = []
+    for i, (name, text) in enumerate(quotes, 1):
+        blocks.append(f"--- QUOTE {i} (file: {name}) ---\n{(text or '')[:4500]}")
+    return (
+        "You are an experienced procurement analyst. Compare the vendor "
+        "quotations below like a professional and produce a committee-ready "
+        "note in markdown.\n\n"
+        "Do this:\n"
+        "1. Identify each vendor and what they are quoting.\n"
+        "2. Put COMPARABLE line items side by side (same product / room type / "
+        "plan / occupancy). Compute effective prices INCLUDING any taxes "
+        "stated (e.g. '2800+5%' = 2940).\n"
+        "3. For each comparable item, say which vendor is cheaper and by how "
+        "much (amount and %).\n"
+        "4. Note non-price differences: inclusions, availability/quantity, "
+        "warranty, validity, payment terms, location, and any missing info or "
+        "risks.\n"
+        "5. End with a clear recommendation of best overall value and why.\n"
+        "Be specific with numbers. Use short sections and bullet points.\n\n"
+        + "\n\n".join(blocks)
+    )
+
+
+def _strip_json_fence(raw: str) -> str:
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        # Drop a leading ```json / ``` fence and the trailing ```.
+        s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s)
+    return s.strip()
+
+
+class LLMProvider(AIProvider):
+    """Base for real LLM backends.
+
+    A concrete provider only implements `available()` and `_chat()`. The shared
+    procurement logic (extract/recommend/reason) lives here so Ollama, Gemini and
+    any future cloud model produce identical, well-tested behaviour — including
+    the all-important "fall back to heuristics, never break" guarantee.
+    """
+
+    def _chat(self, prompt: str, expect_json: bool = False) -> str:
+        raise NotImplementedError
+
+    def extract(self, text, items_df, vendor_hint=""):
+        try:
+            raw = self._chat(build_extract_prompt(text), expect_json=True)
+            return parse_extract_json(raw)
+        except Exception:
+            # Any failure (network, quota, bad JSON) → heuristics, so the app
+            # never breaks just because the cloud hiccuped.
+            return heuristic_extract(text, items_df, vendor_hint)
+
+    def recommend(self, context: str) -> str:
+        try:
+            return self._chat(build_recommend_prompt(context)).strip()
+        except Exception:
+            return ""
+
+    def reason(self, quotes: list[tuple]) -> str:
+        try:
+            return self._chat(build_reason_prompt(quotes)).strip()
+        except Exception:
+            return ""
+
+
 # --- Ollama provider (used when running locally with Ollama) ------------------
-class OllamaProvider(AIProvider):
+class OllamaProvider(LLMProvider):
     name = "Ollama (local LLM)"
+    is_cloud = False
 
     def __init__(self, model: str = "llama3.1", host: str = "http://localhost:11434"):
-        self.model = model
-        self.host = host
+        self.model = model or "llama3.1"
+        self.host = (host or "http://localhost:11434").rstrip("/")
 
     def available(self) -> bool:
         try:
@@ -201,73 +341,266 @@ class OllamaProvider(AIProvider):
         r.raise_for_status()
         return r.json().get("response", "")
 
-    def extract(self, text, items_df, vendor_hint=""):
-        prompt = (
-            "You are a procurement analyst. Extract these fields from the vendor "
-            "quotation text and return ONLY JSON with these exact keys: "
-            + ", ".join(f'\"{f}\"' for f in QUOTE_FIELDS)
-            + ". For each key use an object {\"value\": <string or null>, "
-            "\"confidence\": <0..1>}. If a field is absent, value null and "
-            "confidence 0.\n\nQUOTATION TEXT:\n" + (text or "")[:6000]
-        )
-        try:
-            raw = self._chat(prompt, expect_json=True)
-            data = json.loads(raw)
-            result = {}
-            for f in QUOTE_FIELDS:
-                cell = data.get(f) or {}
-                if isinstance(cell, dict):
-                    result[f] = {"value": cell.get("value"),
-                                 "confidence": float(cell.get("confidence") or 0.0)}
-                else:
-                    result[f] = {"value": cell, "confidence": 0.8 if cell else 0.0}
-            return result
-        except Exception:
-            # Any failure → fall back so the app never breaks.
-            return heuristic_extract(text, items_df, vendor_hint)
+    def test_connection(self) -> tuple[bool, str]:
+        if not self.available():
+            return False, (f"No Ollama server reachable at {self.host}. Start "
+                           "Ollama, or pick a cloud provider in Settings.")
+        return True, f"Ollama reachable at {self.host} (model: {self.model})."
 
-    def recommend(self, context: str) -> str:
-        try:
-            return self._chat(
-                "You are a procurement advisor. Based on the structured comparison "
-                "below, write a concise, professional recommendation (5-8 sentences) "
-                "for a procurement committee. Avoid jargon.\n\n" + context
-            ).strip()
-        except Exception:
-            return ""
 
-    def reason(self, quotes: list[tuple]) -> str:
-        blocks = []
-        for i, (name, text) in enumerate(quotes, 1):
-            blocks.append(f"--- QUOTE {i} (file: {name}) ---\n{(text or '')[:4500]}")
-        prompt = (
-            "You are an experienced procurement analyst. Compare the vendor "
-            "quotations below like a professional and produce a committee-ready "
-            "note in markdown.\n\n"
-            "Do this:\n"
-            "1. Identify each vendor and what they are quoting.\n"
-            "2. Put COMPARABLE line items side by side (same product / room type / "
-            "plan / occupancy). Compute effective prices INCLUDING any taxes "
-            "stated (e.g. '2800+5%' = 2940).\n"
-            "3. For each comparable item, say which vendor is cheaper and by how "
-            "much (amount and %).\n"
-            "4. Note non-price differences: inclusions, availability/quantity, "
-            "warranty, validity, payment terms, location, and any missing info or "
-            "risks.\n"
-            "5. End with a clear recommendation of best overall value and why.\n"
-            "Be specific with numbers. Use short sections and bullet points.\n\n"
-            + "\n\n".join(blocks)
+# --- Gemini provider (primary cloud option) -----------------------------------
+class GeminiProvider(LLMProvider):
+    """Google Gemini via the public Generative Language REST API.
+
+    Deliberately uses plain `requests` (already a dependency) rather than the
+    google SDK: one less thing to install on a restricted laptop, and it works
+    through a normal corporate HTTPS proxy.
+    """
+
+    name = "Gemini (cloud LLM)"
+    is_cloud = True
+    _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    def __init__(self, api_key: str = "", model: str = DEFAULT_GEMINI_MODEL):
+        self.api_key = (api_key or "").strip()
+        self.model = model or DEFAULT_GEMINI_MODEL
+        # Reflect the active model in the label so the UI shows what's in use.
+        self.name = f"Gemini {self.model} (cloud LLM)"
+
+    def available(self) -> bool:
+        # Cheap check: we have a key. A live ping is done by test_connection().
+        return bool(self.api_key)
+
+    def _chat(self, prompt: str, expect_json: bool = False) -> str:
+        import requests
+        gen_cfg = {"temperature": 0.1 if expect_json else 0.2}
+        if expect_json:
+            gen_cfg["response_mime_type"] = "application/json"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": gen_cfg,
+        }
+        url = self._ENDPOINT.format(model=self.model)
+        r = requests.post(
+            url,
+            params={"key": self.api_key},
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=90,
         )
+        r.raise_for_status()
+        data = r.json()
+        return _gemini_text(data)
+
+    def test_connection(self) -> tuple[bool, str]:
+        if not self.api_key:
+            return False, "No Gemini API key configured."
         try:
-            return self._chat(prompt).strip()
+            reply = self._chat("Reply with the single word: OK")
+            if reply:
+                return True, f"Connected to Gemini ({self.model})."
+            return False, "Gemini responded but returned no text."
+        except Exception as e:  # noqa: BLE001
+            return False, f"Gemini connection failed: {_short_error(e)}"
+
+
+def _gemini_text(data: dict) -> str:
+    """Pull the text out of a Gemini generateContent response (or raise)."""
+    candidates = data.get("candidates") or []
+    if not candidates:
+        # Surface a blocked-prompt / error reason instead of silently returning "".
+        feedback = data.get("promptFeedback") or {}
+        reason = feedback.get("blockReason") or (data.get("error") or {}).get("message")
+        raise RuntimeError(f"Gemini returned no candidates ({reason or 'unknown reason'}).")
+    parts = (candidates[0].get("content") or {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts)
+
+
+def _short_error(e: Exception) -> str:
+    msg = str(e)
+    # Try to surface the API's own error message for HTTP errors.
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        try:
+            api_msg = (resp.json().get("error") or {}).get("message")
+            if api_msg:
+                return api_msg
         except Exception:
-            return ""
+            pass
+    return msg[:200]
+
+
+# --- Cloud placeholders (subclass the LLM base; wire up later) -----------------
+class OpenAIProvider(LLMProvider):
+    """Placeholder. The structure is here; only `_chat`/`available` need wiring.
+
+    To enable: implement `_chat` against the OpenAI Chat Completions API using
+    `self.api_key` / `self.model`, and have `available()` return bool(self.api_key).
+    """
+
+    name = "OpenAI (cloud LLM) — coming soon"
+    is_cloud = True
+    implemented = False
+
+    def __init__(self, api_key: str = "", model: str = "gpt-4o-mini"):
+        self.api_key = (api_key or "").strip()
+        self.model = model
+
+    def available(self) -> bool:
+        return False  # not implemented yet
+
+    def _chat(self, prompt: str, expect_json: bool = False) -> str:
+        raise NotImplementedError("OpenAI provider is not implemented yet.")
+
+    def test_connection(self) -> tuple[bool, str]:
+        return False, "OpenAI support is planned but not implemented yet."
+
+
+class ClaudeProvider(LLMProvider):
+    """Placeholder. The structure is here; only `_chat`/`available` need wiring.
+
+    To enable: implement `_chat` against the Anthropic Messages API using
+    `self.api_key` / `self.model`, and have `available()` return bool(self.api_key).
+    """
+
+    name = "Claude (cloud LLM) — coming soon"
+    is_cloud = True
+    implemented = False
+
+    def __init__(self, api_key: str = "", model: str = "claude-haiku-4-5-20251001"):
+        self.api_key = (api_key or "").strip()
+        self.model = model
+
+    def available(self) -> bool:
+        return False  # not implemented yet
+
+    def _chat(self, prompt: str, expect_json: bool = False) -> str:
+        raise NotImplementedError("Claude provider is not implemented yet.")
+
+    def test_connection(self) -> tuple[bool, str]:
+        return False, "Claude support is planned but not implemented yet."
+
+
+# --- Provider selection + status ----------------------------------------------
+# A registry so the Settings page can list providers without hard-coding them,
+# and so a new provider is added in exactly one place.
+PROVIDER_CHOICES = [
+    ("auto", "Auto-detect (Ollama → Gemini → Local)"),
+    ("ollama", "Ollama (local AI)"),
+    ("gemini", "Gemini (cloud AI)"),
+    ("openai", "OpenAI (cloud AI) — coming soon"),
+    ("claude", "Claude (cloud AI) — coming soon"),
+    ("local", "Local rules only (no LLM)"),
+]
+
+
+@dataclass
+class ProviderStatus:
+    """What the UI needs: the chosen provider plus how to describe it."""
+
+    provider: AIProvider
+    label: str                       # e.g. "✓ Gemini Connected (Cloud AI)"
+    level: str                       # "ok" | "warn" | "error"
+    messages: list[str] = field(default_factory=list)  # fallback / action notes
+
+
+def _gemini_from_settings(settings: dict) -> GeminiProvider:
+    return GeminiProvider(api_key=get_api_key("gemini", settings),
+                          model=settings.get("gemini_model") or DEFAULT_GEMINI_MODEL)
+
+
+def _ollama_from_settings(settings: dict) -> OllamaProvider:
+    return OllamaProvider(model=settings.get("ollama_model") or "llama3.1",
+                          host=settings.get("ollama_host") or "http://localhost:11434")
+
+
+def resolve_provider(settings: dict | None = None) -> ProviderStatus:
+    """Pick the active provider from saved settings, applying fallback rules.
+
+    Rules (see the task spec):
+      * Ollama is OPTIONAL. If chosen but unreachable, switch to Gemini when a
+        key is configured, else drop to the local rules engine.
+      * Gemini is the primary cloud option; needs only an API key.
+      * "auto" prefers a running Ollama, then Gemini, then local rules.
+    """
+    settings = settings if settings is not None else load_settings()
+    pref = (settings.get("provider") or "auto").lower()
+
+    gemini = _gemini_from_settings(settings)
+    has_gemini = gemini.available()
+
+    def gemini_status(level="ok", messages=None):
+        return ProviderStatus(gemini, "✓ Gemini Connected (Cloud AI)", level,
+                              messages or [])
+
+    def local_status(level="warn", messages=None):
+        return ProviderStatus(LocalHeuristicProvider(),
+                              "⚠ No AI Provider Configured", level, messages or [])
+
+    # Explicit "local rules only".
+    if pref == "local":
+        return ProviderStatus(LocalHeuristicProvider(),
+                              "✓ Local Rules Engine (no LLM)", "ok", [])
+
+    # Explicit Gemini.
+    if pref == "gemini":
+        if has_gemini:
+            return gemini_status()
+        return local_status("error",
+                            ["Please configure a Gemini API key in Settings."])
+
+    # Explicit Ollama — the OPTIONAL local engine, with cloud fallback.
+    if pref == "ollama":
+        ollama = _ollama_from_settings(settings)
+        if ollama.available():
+            return ProviderStatus(ollama, "✓ Ollama Available (Local AI)", "ok", [])
+        if has_gemini:
+            return gemini_status(
+                "warn",
+                ["Local AI (Ollama) is not available. Switching to Gemini Cloud AI."])
+        return local_status("error", [
+            "Local AI (Ollama) is not available.",
+            "Please configure a Gemini API key in Settings.",
+        ])
+
+    # Placeholders: not implemented → behave like auto, but explain why.
+    if pref in ("openai", "claude"):
+        note = (f"{pref.capitalize()} support is not implemented yet — "
+                "using the best available provider instead.")
+        if has_gemini:
+            return gemini_status("warn", [note])
+        return local_status("warn", [note])
+
+    # Default: auto-detect.
+    ollama = _ollama_from_settings(settings)
+    if ollama.available():
+        return ProviderStatus(ollama, "✓ Ollama Available (Local AI)", "ok", [])
+    if has_gemini:
+        return gemini_status()
+    return local_status("warn", [
+        "No local Ollama and no Gemini key found — using the built-in rules "
+        "engine (works, but without LLM reasoning). Add a Gemini API key in "
+        "Settings for cloud AI.",
+    ])
+
+
+def build_provider(provider_id: str, settings: dict | None = None) -> AIProvider:
+    """Construct a single named provider (used by the Settings 'Test' button)."""
+    settings = settings if settings is not None else load_settings()
+    if provider_id == "gemini":
+        return _gemini_from_settings(settings)
+    if provider_id == "ollama":
+        return _ollama_from_settings(settings)
+    if provider_id == "openai":
+        return OpenAIProvider(api_key=get_api_key("openai", settings),
+                              model=settings.get("openai_model") or "gpt-4o-mini")
+    if provider_id == "claude":
+        return ClaudeProvider(api_key=get_api_key("claude", settings),
+                              model=settings.get("anthropic_model")
+                              or "claude-haiku-4-5-20251001")
+    return LocalHeuristicProvider()
 
 
 def get_provider(prefer: str = "auto") -> AIProvider:
-    """Return the best available provider. 'auto' uses Ollama if reachable."""
-    if prefer in ("auto", "ollama"):
-        ollama = OllamaProvider()
-        if ollama.available():
-            return ollama
-    return LocalHeuristicProvider()
+    """Backward-compatible helper: return just the provider for a preference."""
+    return resolve_provider({"provider": prefer}).provider

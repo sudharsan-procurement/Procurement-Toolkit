@@ -191,7 +191,10 @@ def main():
     """Pick a toolkit section and a tool from the sidebar, then show it."""
     with st.sidebar:
         st.title("🧰 Document Toolkit")
-        section = st.radio("Toolkit", ["Document Tools", "Procurement Toolkit"])
+        section = st.radio(
+            "Toolkit",
+            ["Document Tools", "Procurement Toolkit", "⚙️ Settings"],
+        )
         st.divider()
         if section == "Document Tools":
             tool = st.radio(
@@ -199,13 +202,16 @@ def main():
                 ["📑 Compare documents", "📄 PDF → Word",
                  "📊 Word tables → Excel", "🔀 Reconcile data"],
             )
-        else:
+        elif section == "Procurement Toolkit":
             tool = st.radio(
                 "Choose a tool",
                 ["🤖 AI Quote Analysis", "🧮 Quote Comparison",
                  "✅ PO vs Invoice Validator"],
             )
+        else:
+            tool = "⚙️ Settings"
         st.divider()
+        _render_ai_status_badge()
 
     dispatch = {
         "📑 Compare documents": render_compare,
@@ -215,6 +221,7 @@ def main():
         "🤖 AI Quote Analysis": render_ai_quote_analysis,
         "🧮 Quote Comparison": render_quote_comparison,
         "✅ PO vs Invoice Validator": render_po_validator,
+        "⚙️ Settings": render_settings,
     }
     dispatch[tool]()
 
@@ -598,6 +605,141 @@ def render_reconcile():
     )
 
 
+# ---------------- AI provider status + Settings -----------------------------
+def _status_icon(level: str) -> str:
+    return {"ok": "✅", "warn": "⚠️", "error": "⛔"}.get(level, "•")
+
+
+def _render_ai_status_badge():
+    """Small AI-provider status line shown in the sidebar on every page."""
+    from docdiff.ai_providers import resolve_provider
+
+    try:
+        status = resolve_provider()
+    except Exception:  # never let the badge break the app
+        return
+    st.caption("**AI status**")
+    if status.level == "ok":
+        st.success(status.label)
+    elif status.level == "warn":
+        st.warning(status.label)
+    else:
+        st.error(status.label)
+    if status.level != "ok":
+        st.caption("Configure providers in **⚙️ Settings**.")
+
+
+def render_settings():
+    st.title("⚙️ Settings")
+    st.caption(
+        "Choose which AI engine powers the quote analysis. **No local install is "
+        "required** — pick *Gemini (cloud AI)* and paste an API key to run on a "
+        "corporate laptop with no admin rights. Ollama is optional, for users who "
+        "already run a local LLM."
+    )
+
+    from docdiff.ai_providers import (
+        PROVIDER_CHOICES, resolve_provider, build_provider, DEFAULT_GEMINI_MODEL,
+    )
+    from docdiff import settings as cfg
+
+    current = cfg.load_settings()
+
+    # --- Live status of the currently-saved configuration ---
+    status = resolve_provider(current)
+    st.subheader("Current status")
+    badge = f"{_status_icon(status.level)} {status.label}"
+    if status.level == "ok":
+        st.success(badge)
+    elif status.level == "warn":
+        st.warning(badge)
+    else:
+        st.error(badge)
+    for m in status.messages:
+        st.caption(m)
+    st.divider()
+
+    # --- Provider selection ---
+    st.subheader("AI provider")
+    ids = [c[0] for c in PROVIDER_CHOICES]
+    labels = {c[0]: c[1] for c in PROVIDER_CHOICES}
+    cur_id = current.get("provider", "auto")
+    idx = ids.index(cur_id) if cur_id in ids else 0
+    chosen = st.radio(
+        "Which engine should analyze quotations?",
+        ids, index=idx, format_func=lambda i: labels[i],
+        help="Auto-detect prefers a running Ollama, then Gemini, then the "
+             "built-in local rules engine.",
+    )
+
+    # --- Gemini configuration ---
+    st.subheader("Gemini (cloud AI)")
+    env_src = cfg.key_source("gemini", current)
+    if env_src == "environment":
+        st.info("A Gemini API key was found in your environment "
+                "(GEMINI_API_KEY / GOOGLE_API_KEY). Leave the box blank to keep "
+                "using it, or enter one here to override it.")
+    gemini_key = st.text_input(
+        "Gemini API key", value=current.get("gemini_api_key", ""),
+        type="password",
+        help="Get a free key at https://aistudio.google.com/apikey. Stored "
+             "locally in your user config file — never committed to the repo.",
+    )
+    gemini_model = st.text_input(
+        "Gemini model", value=current.get("gemini_model") or DEFAULT_GEMINI_MODEL,
+        help="e.g. gemini-2.5-flash (fast, recommended) or gemini-2.5-pro.",
+    )
+
+    # --- Ollama (optional) ---
+    with st.expander("Ollama (optional local AI)"):
+        st.caption("Only needed if you run Ollama on your own machine. Not "
+                   "required for the app to work.")
+        ollama_model = st.text_input(
+            "Ollama model", value=current.get("ollama_model") or "llama3.1",
+            key="set_ollama_model")
+        ollama_host = st.text_input(
+            "Ollama host", value=current.get("ollama_host") or "http://localhost:11434",
+            key="set_ollama_host")
+
+    # Assemble the to-be-saved settings from the form.
+    new_settings = dict(current)
+    new_settings.update({
+        "provider": chosen,
+        "gemini_api_key": gemini_key.strip(),
+        "gemini_model": gemini_model.strip() or DEFAULT_GEMINI_MODEL,
+        "ollama_model": ollama_model.strip() or "llama3.1",
+        "ollama_host": ollama_host.strip() or "http://localhost:11434",
+    })
+
+    st.divider()
+    c1, c2 = st.columns(2)
+
+    # --- Test connection ---
+    with c1:
+        test_target = chosen if chosen in ("gemini", "ollama", "openai", "claude") else "gemini"
+        if st.button(f"🔌 Test {test_target} connection", use_container_width=True):
+            with st.spinner(f"Testing {test_target}…"):
+                provider = build_provider(test_target, new_settings)
+                ok, msg = provider.test_connection()
+            (st.success if ok else st.error)(msg)
+
+    # --- Save ---
+    with c2:
+        if st.button("💾 Save configuration", type="primary",
+                     use_container_width=True):
+            path = cfg.save_settings(new_settings)
+            st.success(f"Saved. Configuration stored at `{path}`.")
+            saved_status = resolve_provider(new_settings)
+            st.caption(f"Active provider: {saved_status.label}")
+
+    st.divider()
+    st.caption(
+        "Documents (PDF, DOCX, images, scanned PDFs) are read and OCR'd **locally** "
+        "regardless of provider. Only the extracted text is sent to a cloud "
+        "provider when one is selected."
+    )
+
+
 def render_ai_quote_analysis():
     st.title("🤖 AI Quote Analysis")
     st.caption(
@@ -607,32 +749,24 @@ def render_ai_quote_analysis():
         "standardise the formats first."
     )
 
-    from docdiff.ai_providers import (
-        OllamaProvider, LocalHeuristicProvider, QUOTE_FIELDS,
-    )
+    from docdiff.ai_providers import QUOTE_FIELDS, resolve_provider
     from docdiff.quote_intelligence import analyze_quotes, SCORE_WEIGHTS
 
-    # --- AI engine selection (auto-detect Ollama, else local rules) ---
-    engine = st.radio(
-        "AI engine", ["Auto (use Ollama if running)", "Local rules (no LLM)"],
-        horizontal=True,
-        help="Auto uses a local Ollama LLM when it's running on your computer "
-             "(richer reasoning); otherwise it uses the built-in rules engine, "
-             "which also works on the free cloud host.",
-    )
-    if engine.startswith("Auto"):
-        model = st.text_input("Ollama model (if running)", value="llama3.1",
-                              help="e.g. llama3.1, gemma3, qwen3 — must be pulled "
-                                   "in Ollama. Ignored if Ollama isn't running.")
-        ollama = OllamaProvider(model=model.strip() or "llama3.1")
-        if ollama.available():
-            provider = ollama
-            st.success(f"🟢 Ollama detected — using model **{ollama.model}**.")
-        else:
-            provider = LocalHeuristicProvider()
-            st.info("Ollama not running — using the built-in local rules engine.")
+    # --- AI engine: driven by Settings, with automatic Ollama→Gemini→Local
+    #     fallback. No local install required; configure in ⚙️ Settings. ---
+    status = resolve_provider()
+    provider = status.provider
+    if status.level == "ok":
+        st.success(status.label)
+    elif status.level == "warn":
+        st.warning(status.label)
     else:
-        provider = LocalHeuristicProvider()
+        st.error(status.label)
+    for m in status.messages:
+        st.caption(m)
+    if status.level != "ok":
+        st.caption("➡️ Open **⚙️ Settings** to choose a provider or add a "
+                   "Gemini API key.")
 
     files = st.file_uploader(
         "Upload vendor quotations",
@@ -653,7 +787,7 @@ def render_ai_quote_analysis():
         return
 
     with st.spinner("Reading and analyzing quotations… (scanned files are OCR'd; "
-                    "Ollama analysis can take a little longer)"):
+                    "cloud/local LLM analysis can take a little longer)"):
         analysis = analyze_quotes(
             [(f.name, f.getvalue()) for f in files], provider
         )
@@ -669,7 +803,7 @@ def render_ai_quote_analysis():
         weak = analysis["vendors_with_total"] < n_vendors
 
         if analysis.get("reasoned"):
-            # A real LLM (Ollama) produced an analyst-style comparison.
+            # A real LLM (Ollama or Gemini) produced an analyst-style comparison.
             st.subheader("AI Reasoned Analysis")
             st.markdown(analysis["reasoned"])
             _copy_button(analysis["reasoned"], key="ai_reason")
@@ -681,27 +815,32 @@ def render_ai_quote_analysis():
                     "these documents — common for emailed/prose quotes (e.g. hotel "
                     "tariffs written as text rather than a table). **The ranking "
                     "below is not reliable for these files.** For genuine, "
-                    "analyst-quality reasoning, run this app on your computer with "
-                    "**Ollama** and a pulled model — see *How to get real AI "
-                    "reasoning* below. You can also read each quote's raw text "
-                    "below to compare manually."
+                    "analyst-quality reasoning, enable an LLM provider — see "
+                    "*How to get real AI reasoning* below. You can also read each "
+                    "quote's raw text below to compare manually."
                 )
             st.markdown(analysis["recommendation"])
             _copy_button(analysis["recommendation"], key="ai_reco")
 
-            with st.expander("ℹ️ How to get real AI reasoning (free, on your PC)"):
+            with st.expander("ℹ️ How to get real AI reasoning"):
                 st.markdown(
+                    "**Option A — Gemini cloud AI (no install, works on a "
+                    "corporate laptop):**\n"
+                    "1. Get a free API key at https://aistudio.google.com/apikey.\n"
+                    "2. Open **⚙️ Settings**, select *Gemini (cloud AI)*, paste the "
+                    "key, click **Test connection**, then **Save**.\n"
+                    "3. Re-run the analysis — this tab then shows a full reasoned "
+                    "comparison.\n\n"
+                    "**Option B — Ollama local AI (no cloud, needs a local "
+                    "install):**\n"
                     "1. Install **Ollama** from https://ollama.com (free).\n"
-                    "2. In a terminal run: `ollama pull llama3.1` "
-                    "(or a faster small model: `ollama pull llama3.2`).\n"
-                    "3. Run this app **locally** (`streamlit run app.py`) with the "
-                    "AI engine set to *Auto* and the model name matching what you "
-                    "pulled.\n\n"
-                    "Then this tab shows a full reasoned comparison — effective "
-                    "prices, cheaper-per-item, inclusions, risks, and a "
-                    "recommendation — for any kind of quote (goods, hotels, "
-                    "services). *(Ollama can't run on the free cloud host, so the "
-                    "cloud app always uses the rule-based engine.)*"
+                    "2. Run `ollama pull llama3.1` (or a smaller `llama3.2`).\n"
+                    "3. In **⚙️ Settings** choose *Auto-detect* or *Ollama* and "
+                    "set the model name.\n\n"
+                    "Either option produces effective prices, cheaper-per-item, "
+                    "inclusions, risks, and a recommendation for any kind of quote "
+                    "(goods, hotels, services). *(Ollama can't run on the free "
+                    "cloud host — use Gemini there.)*"
                 )
 
         st.divider()

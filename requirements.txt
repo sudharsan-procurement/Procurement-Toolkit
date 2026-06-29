@@ -14,7 +14,9 @@ numpy>=1.24
 openpyxl>=3.1         # writes the .xlsx reports / reads .xlsx
 pandas>=2.0           # tabular reconcile + procurement engines (also a Streamlit dep)
 jinja2>=3.0           # required by pandas Styler for the highlighted result tables
-requests>=2.28        # used to talk to a local Ollama server (AI Quote Analysis)
+requests>=2.28        # talks to cloud AI (Gemini REST) AND to an optional local
+                      # Ollama server — both over plain HTTPS, so no extra SDK and
+                      # no admin rights needed (works behind a corporate proxy)
 
 # --- Converters (PDF -> Word) ---
 pdf2docx>=0.5         # converts digital PDFs into editable Word .docx

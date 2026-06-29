@@ -74,17 +74,97 @@ No secrets or API keys to configure — it's entirely self-contained.
 
 ---
 
+## AI Quote Analysis — providers & how to choose one
+
+The **🤖 AI Quote Analysis** tool reads vendor quotations (PDF, Word, images,
+scanned PDFs) and produces a procurement-style summary, commercial/technical
+analysis, risk assessment, vendor ranking, and a recommendation.
+
+It runs on a pluggable **AI provider** layer (`docdiff/ai_providers.py`). The app
+**does not require any local AI install** — a local Ollama server is entirely
+**optional**. This matters on a corporate laptop where you can't install or run
+background services.
+
+### The providers
+
+| Provider | Where it runs | Needs | Best for |
+|---|---|---|---|
+| **Local rules** (`LocalHeuristicProvider`) | In-process | nothing | Always-on safety net; no LLM reasoning |
+| **Gemini** (`GeminiProvider`) | Google cloud | an API key + outbound HTTPS | **Corporate laptops** — no install, no admin rights |
+| **Ollama** (`OllamaProvider`) | Your machine | a local Ollama install | Fully offline LLM reasoning |
+| **OpenAI / Claude** | Cloud | _placeholders_ | Wired up later (structure is in place) |
+
+All LLM providers share the same procurement prompts and JSON parsing, so they
+behave identically — only the transport differs. Document reading and OCR always
+happen **locally**; only the extracted text is sent to a cloud provider, and only
+when one is selected.
+
+### Use Gemini (recommended for cloud / no-install)
+
+1. Get a free API key at <https://aistudio.google.com/apikey>.
+2. Open **⚙️ Settings** in the app, select **Gemini (cloud AI)**, paste the key.
+3. Click **Test connection**, then **Save configuration**.
+4. The status indicator shows **✓ Gemini Connected (Cloud AI)**.
+
+The default model is `gemini-2.5-flash` (fast and inexpensive); you can change it
+in Settings (e.g. `gemini-2.5-pro`). Instead of pasting the key you may set the
+`GEMINI_API_KEY` (or `GOOGLE_API_KEY`) environment variable — the app reads the
+saved config first, then falls back to the environment.
+
+### Use Ollama (optional, fully local)
+
+1. Install **Ollama** from <https://ollama.com> and run `ollama pull llama3.1`.
+2. In **⚙️ Settings** choose **Auto-detect** or **Ollama** and set the model name.
+3. The status indicator shows **✓ Ollama Available (Local AI)**.
+
+### How provider switching works
+
+The provider is chosen by `resolve_provider()` from your saved settings:
+
+- **Auto-detect** (default): a running **Ollama → Gemini (if a key is set) →
+  Local rules**.
+- **Ollama** selected but **not reachable**: the app automatically switches to
+  Gemini when a key is configured — *"Local AI (Ollama) is not available.
+  Switching to Gemini Cloud AI."* — otherwise it drops to the local rules engine.
+- **Gemini** selected but **no key**: *"Please configure a Gemini API key in
+  Settings."* and the local rules engine is used so the app still works.
+
+The sidebar and the AI Quote Analysis page always show a clear status badge:
+**✓ Ollama Available (Local AI)**, **✓ Gemini Connected (Cloud AI)**, or
+**⚠ No AI Provider Configured**.
+
+### Where settings are stored
+
+Settings (provider choice + API key) are saved to a per-user JSON file at
+`~/.smartdoc/config.json` (owner-only permissions where the OS supports it). It
+lives in your home directory, so writing it needs no admin rights, and it is
+**git-ignored** so keys never land in the repo. Set `SMARTDOC_CONFIG_DIR` to use a
+different location.
+
+### Adding another provider (e.g. enabling OpenAI/Claude)
+
+`OpenAIProvider` and `ClaudeProvider` already subclass the shared `LLMProvider`
+base. To enable one, implement its `_chat()` against the vendor's API and have
+`available()` return `bool(self.api_key)` — the extraction, recommendation, and
+reasoning logic is inherited unchanged, and it's already registered in
+`PROVIDER_CHOICES` for the Settings dropdown.
+
+---
+
 ## Project layout
 
 ```
-app.py                 The Streamlit user interface (drawing only)
+app.py                 The Streamlit user interface (incl. ⚙️ Settings page)
 docdiff/
-  extract.py           Stage 1 — read text from PDF / .docx
+  extract.py           Stage 1 — read text from PDF / .docx (local + OCR)
   segment.py           Stage 2 — split text into clauses
   align.py             Stage 3 — match clauses by meaning (local model)
   numbers.py           Number extraction + comparison
   compare.py           Stage 4 — classify & rank each change
   export.py            Stage 5 — Excel report
+  ai_providers.py      AI provider layer (Local / Gemini / Ollama / OpenAI / Claude)
+  settings.py          Local config + API-key resolution (file → env var)
+  quote_intelligence.py Provider-independent quote scoring / ranking / risk
 samples/               Two example contracts for testing
 selftest.py            Runs the engine on the samples and prints results
 requirements.txt       The packages to install
@@ -107,14 +187,18 @@ In priority order, matching the project plan:
 3. **Optional AI "meaning summary" layer** — a one-line plain-English summary of
    *why* each change matters. This is the one piece that may use a cloud AI API.
 
-### The one deferred decision
+### The AI "meaning summary" decision (resolved)
 
-For that future AI summary layer:
+The optional AI layer is now implemented as a **pluggable provider** rather than a
+single hard-coded choice — see [AI Quote Analysis — providers](#ai-quote-analysis--providers--how-to-choose-one)
+above:
 
 | Option | Pros | Cons |
 |---|---|---|
-| **Local model** (current default) | Free, fully private, nothing sent out | Slightly weaker summaries |
-| **Cloud AI API** | Sharper summaries | Small cost, sends contract text to a provider |
+| **Local rules** (default safety net) | Free, fully private, nothing sent out | No LLM reasoning |
+| **Gemini** (cloud) | Sharp reasoning, **no install / no admin rights** | Sends extracted text to Google; needs an API key |
+| **Ollama** (local LLM) | Sharp reasoning, fully offline | Needs a local install (not possible on locked-down laptops) |
 
-Everything in this MVP uses the **local** option. The cloud option is only worth
-revisiting for the optional summary layer, and only if privacy rules allow it.
+The app **auto-detects** what's available and falls back gracefully, so it works
+on a corporate laptop with **no local model installed** — just add a Gemini key in
+**⚙️ Settings** for full AI reasoning, or run with the local rules engine as-is.
