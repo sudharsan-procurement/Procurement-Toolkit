@@ -442,6 +442,9 @@ def render_fcra_analyzer():
         f"{METADATA['last_reviewed']}). FCRA rules change via MHA notifications — "
         "verify findings at fcraonline.nic.in and consult a qualified professional."
     )
+    if METADATA.get("needs_confirmation"):
+        st.caption("Awaiting gazette confirmation: "
+                   + "; ".join(METADATA["needs_confirmation"]))
 
     file = st.file_uploader(
         "Upload an agreement to review",

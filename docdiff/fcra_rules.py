@@ -34,23 +34,37 @@ Each rule is a dict:
 from __future__ import annotations
 
 # Bump this whenever you review/update the rules below.
+# Amendment history is taken from the official MHA index at
+# https://fcraonline.nic.in/home/order.aspx (an INDEX of notifications — the
+# substantive text is in the linked gazette PDFs, which should be confirmed).
 METADATA = {
     "act": "Foreign Contribution (Regulation) Act, 2010 (India)",
     "amendments": [
         "FCRA (Amendment) Act, 2020",
-        "FCRA (Amendment) Rules, 2022 (effective 1 July 2022)",
+        "FCRA (Amendment) Rules, 2022 (eff. 1 July 2022)",
+        "FCRA (Amendment) Rules, 2023 (FC-4 asset tables)",
+        "FCRA (Amendment) Rules, 2024 (eff. 1 Jan 2025 — carry-forward, TDS refund)",
+        "FCRA (Amendment) Rules, 2025",
+        "FCRA (Amendment) Rules, 2026 (22 June 2026 — key functionaries, "
+        "India-only use, FC-4/FC-6F changes)",
     ],
-    "version": "2022.07",
-    "last_reviewed": "2024-09",
+    "version": "2026.06",
+    "last_reviewed": "2026-06",
     "sources": [
-        "https://fcraonline.nic.in",
+        "https://fcraonline.nic.in/home/order.aspx",
         "https://www.mha.gov.in",
+    ],
+    # The most recent amendment (22 June 2026) is incorporated from secondary
+    # analysis, not the raw gazette text — flag it for confirmation.
+    "needs_confirmation": [
+        "FCRA (Amendment) Rules, 2026 (22 June 2026) — confirm against the gazette",
     ],
     "disclaimer": (
         "Automated checklist against the Foreign Contribution (Regulation) Act, "
-        "2010 (as amended in 2020 and the 2022 Rules). This is NOT legal advice "
-        "and may not reflect the very latest MHA notifications — verify at "
-        "fcraonline.nic.in and consult a qualified professional."
+        "2010 (as amended in 2020 and the FCRA Rules through the 22 June 2026 "
+        "amendment). This is NOT legal advice and may not reflect the very latest "
+        "MHA notifications — verify at fcraonline.nic.in and consult a qualified "
+        "professional."
     ),
 }
 
@@ -195,6 +209,52 @@ RULES = [
             "accepting any foreign contribution."
         ),
     },
+    {
+        "id": "FC-USE-OUTSIDE-INDIA",
+        "title": "Use of foreign contribution for activities outside India",
+        "category": "Utilisation",
+        "severity": "high",
+        "mode": "presence",
+        "patterns": [
+            r"outside india", r"\babroad\b",
+            r"overseas (?:activit|programme|program|operation|project)",
+            r"(?:use|utilis\w+|spend|deploy)[^.\n]{0,30}(?:outside india|abroad)",
+        ],
+        "reference": "FCRA (Amendment) Rules, 2026 (22 June 2026); FCRA 2010 s.8 utilisation",
+        "explanation": (
+            "The 2026 amendment reinforces that foreign contribution must be used "
+            "exclusively for India-based activities aligned with the registered "
+            "objectives. Deploying FC for activities outside India is a risk."
+        ),
+        "recommendation": (
+            "Restrict FC utilisation to India-based activities within the "
+            "FCRA-registered objectives; route any overseas spend through "
+            "non-FCRA funds."
+        ),
+    },
+    {
+        "id": "FC-FOREIGN-FUNCTIONARY",
+        "title": "Foreign national (non OCI/PIO) as a key functionary",
+        "category": "Eligibility",
+        "severity": "high",
+        "mode": "presence",
+        "patterns": [
+            r"foreign national[^.\n]{0,40}(?:director|trustee|office bearer|key functionary|governing body|board member)",
+            r"(?:director|trustee|office bearer|key functionary|board member)[^.\n]{0,40}foreign national",
+            r"non[-\s]?resident[^.\n]{0,30}(?:director|trustee|office bearer)",
+        ],
+        "reference": "FCRA (Amendment) Rules, 2026 — key functionaries / foreign nationals",
+        "explanation": (
+            "Under the 2026 amendment, only OCI/PIO foreign nationals may "
+            "ordinarily serve as key functionaries (directors, trustees, office "
+            "bearers, governing-body members); other foreign nationals are "
+            "ineligible unless the Central Government specifies an exception."
+        ),
+        "recommendation": (
+            "Ensure key functionaries are Indian citizens or OCI/PIO holders; "
+            "remove ineligible foreign nationals or seek a specific exception."
+        ),
+    },
     # --- Required safeguards (absence checks → compliance checklist) ----------
     {
         "id": "FC-REGISTRATION-REF",
@@ -273,12 +333,15 @@ RULES = [
             r"annual return", r"\bfc[-\s]?4\b", r"utilis(?:ation|ed) (?:report|certificate)",
             r"separate (?:books|account)s? of account", r"audited (?:utilisation|accounts)",
         ],
-        "reference": "FCRA Rules — annual return Form FC-4 by 31 December; separate books of account",
+        "reference": "FCRA Rules — annual return Form FC-4 by 31 December (enhanced by 2023/2026 amendments: asset tables, UDIN, activity & social-media disclosures)",
         "explanation": (
             "The agreement does not appear to require FCRA reporting (annual return "
-            "FC-4 by 31 December, separate books of account, utilisation reporting). "
-            "Note: the earlier quarterly website-disclosure (Rule 13(b)) was omitted "
-            "w.e.f. 1 July 2022, so its absence is NOT a defect."
+            "Form FC-4 by 31 December, separate books of account, utilisation "
+            "reporting). The 2023 and 2026 amendments expanded FC-4 (asset tables, "
+            "UDIN on the CA certificate, detailed activity and social-media "
+            "disclosures). Note: the earlier quarterly website-disclosure "
+            "(Rule 13(b)) was omitted w.e.f. 1 July 2022, so its absence is NOT a "
+            "defect."
         ),
         "recommendation": (
             "Require the recipient to maintain separate FCRA books and file the "

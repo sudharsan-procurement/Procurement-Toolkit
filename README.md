@@ -148,7 +148,11 @@ different location.
 **Document Tools → 🛡️ FCRA Risk Analyzer** reviews a **funding / grant agreement,
 MoU or sub-grant agreement** for compliance risks under India's **Foreign
 Contribution (Regulation) Act, 2010** — as amended by the FCRA (Amendment) Act,
-2020 and the FCRA (Amendment) Rules, 2022 (effective 1 July 2022).
+2020 and the FCRA Rules through the **22 June 2026** amendment (2022, 2023, 2024,
+2025, 2026). The amendment history is taken from the official MHA index at
+<https://fcraonline.nic.in/home/order.aspx>; that page lists notifications, while
+the substantive text lives in the linked gazette PDFs, so the newest amendment is
+marked "awaiting gazette confirmation" in the app until verified.
 
 > ⚠️ **Not legal advice.** It's an automated checklist against a maintainable
 > rule-set, which may not reflect the very latest MHA notifications. Verify
