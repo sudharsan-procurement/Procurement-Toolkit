@@ -141,6 +141,46 @@ lives in your home directory, so writing it needs no admin rights, and it is
 **git-ignored** so keys never land in the repo. Set `SMARTDOC_CONFIG_DIR` to use a
 different location.
 
+---
+
+## FCRA Risk Analyzer (India)
+
+**Document Tools → 🛡️ FCRA Risk Analyzer** reviews a **funding / grant agreement,
+MoU or sub-grant agreement** for compliance risks under India's **Foreign
+Contribution (Regulation) Act, 2010** — as amended by the FCRA (Amendment) Act,
+2020 and the FCRA (Amendment) Rules, 2022 (effective 1 July 2022).
+
+> ⚠️ **Not legal advice.** It's an automated checklist against a maintainable
+> rule-set, which may not reflect the very latest MHA notifications. Verify
+> findings at <https://fcraonline.nic.in> and consult a qualified professional.
+
+**How it works** (same two-layer pattern as the rest of the app):
+
+1. Reads the uploaded file (PDF / DOCX / image / scanned, via local OCR).
+2. Runs a **deterministic rule engine** (`docdiff/fcra.py`) over the text —
+   keyword/pattern checks with a negation guard (so a *prohibition* clause like
+   "shall **not** transfer the funds" isn't flagged as a risk). It produces an
+   overall **High / Medium / Low** rating, a findings list, and a compliance
+   checklist. This always works offline.
+3. If an AI provider is configured, adds a **grounded AI summary** (like AI Quote
+   Analysis): the prompt carries the shipped FCRA rule references and instructs
+   the model to rely on those, not its own (possibly stale) legal memory.
+
+**What it checks** (each cited to an FCRA section/rule): onward transfer /
+sub-granting ban (s.7, 2020), 20% administrative-expenses cap (s.8, 2020),
+designated SBI New Delhi FCRA account (s.17, 2020), no commingling with local
+funds, no speculative use (Rule 4), registration / prior permission (s.11),
+prohibited persons (s.3), reporting via Form FC-4, and foreign-source
+detection. Results download as an `.xlsx` report.
+
+**Keeping it current** — the rule-set lives in `docdiff/fcra_rules.py`, a plain,
+commented, editable list. Add or adjust an entry and bump
+`METADATA["last_reviewed"]`; the engine, report, and AI grounding pick it up
+automatically. This is the deliberate way the tool stays "up to date" rather than
+freezing a snapshot of the law in code.
+
+---
+
 ### Adding another provider (e.g. enabling OpenAI/Claude)
 
 `OpenAIProvider` and `ClaudeProvider` already subclass the shared `LLMProvider`

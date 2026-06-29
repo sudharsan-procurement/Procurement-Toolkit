@@ -246,8 +246,8 @@ def main():
         if section == "Document Tools":
             tool = st.radio(
                 "Choose a tool",
-                ["📑 Compare documents", "📄 PDF → Word",
-                 "📊 Word tables → Excel", "🔀 Reconcile data"],
+                ["📑 Compare documents", "🛡️ FCRA Risk Analyzer",
+                 "📄 PDF → Word", "📊 Word tables → Excel", "🔀 Reconcile data"],
             )
         elif section == "Procurement Toolkit":
             tool = st.radio(
@@ -262,6 +262,7 @@ def main():
 
     dispatch = {
         "📑 Compare documents": render_compare,
+        "🛡️ FCRA Risk Analyzer": render_fcra_analyzer,
         "📄 PDF → Word": render_pdf_to_word,
         "📊 Word tables → Excel": render_word_to_excel,
         "🔀 Reconcile data": render_reconcile,
@@ -417,6 +418,168 @@ def _render_results(changes, old_segs, new_segs, show_formatting):
                 f"border-radius:6px'>{c.diff_html}</div>",
                 unsafe_allow_html=True,
             )
+
+
+def render_fcra_analyzer():
+    st.title("🛡️ FCRA Risk Analyzer")
+    st.caption(
+        "Check a **funding / grant agreement, MoU or sub-grant agreement** for "
+        "compliance risks under India's **Foreign Contribution (Regulation) Act, "
+        "2010** (as amended in 2020 and the 2022 Rules). Works on PDF, Word, image "
+        "and scanned files. Deterministic checks run offline; an AI provider adds "
+        "an analyst-style summary like AI Quote Analysis."
+    )
+
+    from docdiff.fcra import analyze_fcra, ai_fcra_review, build_fcra_excel
+    from docdiff.fcra_rules import METADATA
+    from docdiff.ai_providers import resolve_provider
+    from docdiff.quote_intelligence import parse_quote_file
+
+    # Prominent, unmissable disclaimer — this is a checklist, not legal advice.
+    st.warning(
+        "⚠️ **Not legal advice.** This is an automated checklist against the FCRA "
+        f"rule-set (knowledge base v{METADATA['version']}, last reviewed "
+        f"{METADATA['last_reviewed']}). FCRA rules change via MHA notifications — "
+        "verify findings at fcraonline.nic.in and consult a qualified professional."
+    )
+
+    file = st.file_uploader(
+        "Upload an agreement to review",
+        type=["pdf", "docx", "png", "jpg", "jpeg", "webp", "tiff", "tif", "bmp",
+              "txt"],
+        key="fcra_file",
+    )
+    if not file:
+        st.info("⬆️ Upload a funding/grant agreement to begin.")
+        with st.expander("ℹ️ What this checks (FCRA rule-set)"):
+            from docdiff.fcra_rules import RULES
+            st.caption(f"Based on: {METADATA['act']} — "
+                       + "; ".join(METADATA["amendments"]))
+            st.table([{"Severity": r["severity"].upper(), "Check": r["title"],
+                       "FCRA reference": r["reference"]} for r in RULES])
+        return
+
+    _show_uploaded_files([file])
+    if not st.button("Analyze FCRA risk", type="primary"):
+        return
+
+    with st.spinner("Reading the agreement… (scanned files are OCR'd)"):
+        parsed = parse_quote_file(file.getvalue(), file.name)
+    text = parsed.get("text") or ""
+    if len(text.strip()) < 40:
+        st.error("Couldn't read enough text from this file. If it's a scanned "
+                 "document or image, the scan may be too low-quality for OCR — try "
+                 "a clearer copy.")
+        return
+
+    result = analyze_fcra(text)
+
+    # ---------- Overall rating ----------
+    rating = result["rating"]
+    counts = result["counts"]
+    rating_msg = (f"**Overall FCRA risk: {rating}** — "
+                  f"{counts['high']} high, {counts['medium']} medium, "
+                  f"{counts['low']} low risk finding(s).")
+    if rating == "High":
+        st.error("🔴 " + rating_msg)
+    elif rating == "Medium":
+        st.warning("🟠 " + rating_msg)
+    else:
+        st.success("🟢 " + rating_msg)
+
+    # ---------- Provider status for the AI summary ----------
+    status = resolve_provider()
+    provider = status.provider
+
+    tabs = st.tabs(["🧾 AI Summary", "⚠️ Risk Findings", "✅ Compliance Checklist",
+                    "📄 Extracted Text"])
+
+    # 1) AI Summary (grounded LLM review, with deterministic fallback)
+    with tabs[0]:
+        if getattr(provider, "is_llm", False):
+            if getattr(provider, "is_cloud", False):
+                st.caption("⚠️ Uses a cloud provider: the agreement text is sent to "
+                           "the provider to generate this review. Switch to local "
+                           "Ollama in ⚙️ Settings to keep everything on-device.")
+            with st.spinner(f"Reviewing FCRA risk with {provider.name}…"):
+                review = ai_fcra_review(text, result, provider)
+            if review:
+                st.markdown(review)
+                _copy_button(review, key="fcra_ai_review")
+            else:
+                st.warning("The AI review couldn't be generated (provider error). "
+                           "See the deterministic findings in the next tab.")
+        else:
+            st.info("No AI provider is active, so this shows the deterministic "
+                    "summary. Enable **Gemini (cloud)** or local **Ollama** in "
+                    "**⚙️ Settings** for an analyst-style FCRA review.")
+            st.markdown(_fcra_deterministic_summary(result))
+            _copy_button(_fcra_deterministic_summary(result), key="fcra_det_review")
+
+    # 2) Risk Findings
+    with tabs[1]:
+        findings = [f for f in result["findings"] if f["severity"] != "info"]
+        if not findings:
+            st.success("No FCRA risk findings triggered by the rule-set. 🎉 "
+                       "(Still verify manually — see the disclaimer above.)")
+        else:
+            st.caption("Most severe first. Each is a pre-scan signal — confirm "
+                       "against the clause text.")
+        _SEV_ICON = {"high": "🔴", "medium": "🟠", "low": "🟡", "info": "⚪"}
+        for f in findings:
+            kind = "Present in text" if f["kind"] == "found" else "Missing safeguard"
+            with st.expander(f"{_SEV_ICON.get(f['severity'], '•')} "
+                             f"**{f['title']}** — {kind} · {f['category']}",
+                             expanded=(f["severity"] == "high")):
+                st.markdown(f"**FCRA reference:** {f['reference']}")
+                st.markdown(f"**Why it matters:** {f['explanation']}")
+                st.markdown(f"**Recommendation:** {f['recommendation']}")
+                if f.get("evidence"):
+                    st.markdown("**Where it appears:**")
+                    for ev in f["evidence"]:
+                        st.markdown(f"> …{ev}…")
+        st.divider()
+        st.download_button(
+            "⬇️ Download FCRA risk report (.xlsx)",
+            data=build_fcra_excel(result),
+            file_name="fcra_risk_report.xlsx",
+            mime=XLSX_MIME,
+        )
+
+    # 3) Compliance Checklist
+    with tabs[2]:
+        st.caption("Safeguards an FCRA-compliant funding agreement should contain.")
+        st.table([{
+            "Safeguard": c["title"],
+            "Present?": "✅ Yes" if c["present"] else "❌ No",
+            "If missing": c["severity"].upper(),
+            "FCRA reference": c["reference"],
+        } for c in result["checklist"]])
+
+    # 4) Extracted text
+    with tabs[3]:
+        if parsed.get("note"):
+            st.caption(parsed["note"])
+        st.text(text[:8000] + ("…" if len(text) > 8000 else ""))
+
+
+def _fcra_deterministic_summary(result) -> str:
+    """Plain-markdown FCRA summary used when no LLM provider is configured."""
+    lines = [f"**Overall FCRA risk: {result['rating']}**", ""]
+    risks = [f for f in result["findings"] if f["severity"] != "info"]
+    if not risks:
+        lines.append("No rule-based FCRA risks were triggered.")
+    else:
+        lines.append("**Findings (most severe first):**")
+        for f in risks:
+            kind = "found in text" if f["kind"] == "found" else "safeguard missing"
+            lines.append(f"- **[{f['severity'].upper()}] {f['title']}** "
+                         f"({kind}) — {f['recommendation']} "
+                         f"_(ref: {f['reference']})_")
+    lines.append("")
+    lines.append("_Automated checklist, not legal advice — verify against the "
+                 "latest MHA notifications._")
+    return "\n".join(lines)
 
 
 def render_pdf_to_word():
