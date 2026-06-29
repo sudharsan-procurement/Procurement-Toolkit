@@ -157,6 +157,53 @@ def _copy_button(text: str, key: str = "copy"):
     )
 
 
+def _render_ai_contract_review(changes):
+    """Optional LLM review of contract changes — what changed, why, and risks.
+
+    Uses whatever AI provider is configured in ⚙️ Settings (Gemini cloud or local
+    Ollama). With no LLM provider it shows a short hint and gets out of the way;
+    the rule-based executive summary below always works offline.
+    """
+    from docdiff.ai_providers import resolve_provider
+    from docdiff.summary import ai_summarize_changes
+
+    try:
+        provider = resolve_provider().provider
+    except Exception:
+        return  # never let the AI layer break the core comparison
+
+    st.subheader("🤖 AI Contract Review")
+
+    if not getattr(provider, "is_llm", False):
+        st.info(
+            "Enable an AI provider — **Gemini (cloud)** or local **Ollama** — in "
+            "**⚙️ Settings** to get an analyst-style review of these changes: what "
+            "changed, why it matters, and risk flags. The structured summary below "
+            "works without any AI."
+        )
+        return
+
+    if getattr(provider, "is_cloud", False):
+        st.caption(
+            "⚠️ This review uses a cloud provider: the **changed clause text** "
+            "(not your whole document) is sent to the provider to generate it. "
+            "Switch to local Ollama in ⚙️ Settings to keep everything on-device."
+        )
+
+    with st.spinner(f"Reviewing the changes with {provider.name}…"):
+        review = ai_summarize_changes(changes, provider)
+
+    if review:
+        st.markdown(review)
+        _copy_button(review, key="ai_contract_review")
+    else:
+        st.warning(
+            "The AI review couldn't be generated (the provider returned nothing "
+            "or errored). The structured summary below is still available."
+        )
+    st.divider()
+
+
 def _render_executive_summary(changes):
     """Feature 2: business-friendly summary of the differences (rule-based)."""
     from docdiff.summary import summarize_changes, summary_to_text
@@ -231,7 +278,8 @@ def render_compare():
     st.caption(
         "Compares two contracts by **meaning**, not just text. Matches clauses "
         "even if they were reordered, and flags changed **numbers** loudly. "
-        "Runs fully local — no AI API key, nothing leaves this app."
+        "The comparison runs fully local; an optional **AI Contract Review** adds "
+        "an analyst-style write-up when a provider is configured in ⚙️ Settings."
     )
 
     # ---------------- Sidebar settings ----------------
@@ -329,6 +377,9 @@ def _render_results(changes, old_segs, new_segs, show_formatting):
     if not visible:
         st.success("No material changes found. 🎉")
         return
+
+    # ---------- AI contract review (optional LLM layer) ----------
+    _render_ai_contract_review(visible)
 
     # ---------- Executive summary (business-friendly, rule-based) ----------
     _render_executive_summary(visible)

@@ -216,3 +216,75 @@ def summary_to_text(summary: dict) -> str:
             lines.extend(f"  - {b}" for b in bullets)
             lines.append("")
     return "\n".join(lines).strip()
+
+
+# --- Optional AI layer (used when an LLM provider is configured) --------------
+# The rule-based summary above always works offline. When the user has enabled an
+# LLM provider (Gemini cloud or local Ollama), we can additionally ask it for an
+# analyst-style review of the SAME detected changes. The provider abstraction
+# keeps this engine-agnostic; non-LLM providers return "" and the caller simply
+# shows the rule-based summary instead.
+
+def build_change_digest(changes, max_changes: int = 40, snippet: int = 240) -> str:
+    """Compact, token-bounded text describing the material changes for an LLM.
+
+    We send only the *changed* clauses (old -> new), not the whole document, and
+    cap both the number of changes and each snippet's length so the request stays
+    small and cheap.
+    """
+    material = [c for c in changes if c.category != "Formatting only"]
+    lines: list[str] = []
+    for c in material[:max_changes]:
+        head = f"[{c.category}] clause {c.label}"
+        if c.number_changes:
+            nums = "; ".join(f"{nc.old} -> {nc.new} ({nc.description})"
+                             for nc in c.number_changes)
+            head += f" | figures: {nums}"
+        lines.append(head)
+        if c.category == "Clause added":
+            lines.append(f"  NEW: {(c.new_text or '')[:snippet]}")
+        elif c.category == "Clause removed":
+            lines.append(f"  REMOVED: {(c.old_text or '')[:snippet]}")
+        else:
+            lines.append(f"  OLD: {(c.old_text or '')[:snippet]}")
+            lines.append(f"  NEW: {(c.new_text or '')[:snippet]}")
+    if len(material) > max_changes:
+        lines.append(f"...and {len(material) - max_changes} more change(s).")
+    return "\n".join(lines)
+
+
+def build_contract_summary_prompt(digest: str) -> str:
+    """Prompt for an analyst-style review of contract/agreement changes."""
+    return (
+        "You are a contracts analyst reviewing what changed between an ORIGINAL "
+        "and a REVISED version of a legal document (e.g. a contract or "
+        "agreement). Below is the list of detected changes (old -> new). Write a "
+        "concise, professional review in markdown for a non-lawyer "
+        "decision-maker.\n\n"
+        "Cover, using short sections and bullet points:\n"
+        "1. **What changed** — group related changes (commercial, legal, "
+        "operational).\n"
+        "2. **Why it matters** — the practical impact of each material change.\n"
+        "3. **Risk flags** — anything that increases the reader's risk or "
+        "obligations (higher penalties, reduced warranty/liability protection, "
+        "longer payment terms, new obligations, removed protections). Call these "
+        "out clearly.\n"
+        "4. **Bottom line** — 1-2 sentences: is this revision favourable, "
+        "neutral, or unfavourable to the reader, and what to double-check.\n\n"
+        "Be specific with the figures shown. Do NOT invent changes that aren't "
+        "listed. Keep it tight.\n\n"
+        "DETECTED CHANGES:\n" + digest
+    )
+
+
+def ai_summarize_changes(changes, provider) -> str:
+    """Analyst-style markdown review of the changes, or "" if no LLM is active.
+
+    Safe to call with any provider: a non-LLM provider (or a failed cloud call)
+    returns "", so the UI just falls back to the rule-based executive summary.
+    """
+    material = [c for c in changes if c.category != "Formatting only"]
+    if not material:
+        return ""
+    digest = build_change_digest(changes)
+    return provider.narrate(build_contract_summary_prompt(digest))

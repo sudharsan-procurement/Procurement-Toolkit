@@ -57,6 +57,8 @@ class AIProvider(ABC):
     name = "base"
     # True for cloud providers (text leaves the machine); drives privacy notices.
     is_cloud = False
+    # True for real LLM backends (can do free-form reasoning via narrate()).
+    is_llm = False
 
     @abstractmethod
     def available(self) -> bool:
@@ -79,6 +81,16 @@ class AIProvider(ABC):
         "" if this provider can't truly reason (no LLM). Only a real LLM provider
         overrides this — it's what produces analyst-quality output for any kind of
         quotation (goods, hotels, services), not just the fixed field schema.
+        """
+        return ""
+
+    def narrate(self, prompt: str) -> str:
+        """Domain-agnostic escape hatch: run an arbitrary prompt and return text.
+
+        This is the seam any feature (quote analysis, contract diff review, …)
+        uses to get free-form LLM reasoning without coupling the provider to that
+        feature's prompts. Non-LLM providers return "" so callers fall back to
+        their own deterministic output.
         """
         return ""
 
@@ -285,8 +297,16 @@ class LLMProvider(AIProvider):
     the all-important "fall back to heuristics, never break" guarantee.
     """
 
+    is_llm = True
+
     def _chat(self, prompt: str, expect_json: bool = False) -> str:
         raise NotImplementedError
+
+    def narrate(self, prompt: str) -> str:
+        try:
+            return self._chat(prompt).strip()
+        except Exception:
+            return ""
 
     def extract(self, text, items_df, vendor_hint=""):
         try:

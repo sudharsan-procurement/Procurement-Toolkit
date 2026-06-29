@@ -202,3 +202,15 @@ above:
 The app **auto-detects** what's available and falls back gracefully, so it works
 on a corporate laptop with **no local model installed** — just add a Gemini key in
 **⚙️ Settings** for full AI reasoning, or run with the local rules engine as-is.
+
+### The same AI layer powers Compare documents
+
+**Document Tools → Compare documents** uses the *same* provider setting. After it
+detects the clause-level changes (locally, by meaning), it can add an optional
+**🤖 AI Contract Review** — an analyst-style write-up of *what changed, why it
+matters, and the risk flags* (higher penalties, reduced warranty, longer payment
+terms, removed protections, new obligations). With no LLM configured it's hidden
+and the offline rule-based "Executive Summary" is shown instead. When a cloud
+provider is active, only the **changed clause text** (not the whole document) is
+sent out — a notice says so, and switching to local Ollama keeps everything
+on-device.
