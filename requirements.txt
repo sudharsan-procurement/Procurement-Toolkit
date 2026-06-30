@@ -1,5 +1,6 @@
 # --- Core app ---
-streamlit>=1.33
+streamlit>=1.42        # >=1.42 needed for native Google Sign-In (st.login/st.user)
+Authlib>=1.3.2         # required by Streamlit's OIDC auth (optional sign-in only)
 
 # --- Document extraction (digital files only in the MVP) ---
 pdfplumber>=0.11      # pulls text out of digital (non-scanned) PDFs

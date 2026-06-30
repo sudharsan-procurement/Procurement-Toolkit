@@ -9,3 +9,10 @@ venv/
 .smartdoc/
 config.json
 .tmpcfg/
+
+# Streamlit secrets (OAuth client id/secret, cookie secret) — never commit
+.streamlit/secrets.toml
+
+# Local analytics database
+*.db
+analytics.db

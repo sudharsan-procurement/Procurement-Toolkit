@@ -147,8 +147,10 @@ RULES = [
         "mode": "threshold",
         "threshold_percent": 20,
         "patterns": [
-            r"(?:administrative|admin|overhead|indirect|management)\s+(?:expense|cost|charge|fee)s?[^.\n%]{0,40}?(\d{1,3})\s*%",
-            r"(\d{1,3})\s*%[^.\n]{0,30}(?:administrative|admin|overhead|indirect) (?:expense|cost)",
+            # "administrative … 35%", "admin expenses 30%", "overhead of 25%".
+            r"(?:administrative|admin|overhead|indirect)\b[^.\n%]{0,30}?(\d{1,3})\s*%",
+            r"management\s+fee[^.\n%]{0,30}?(\d{1,3})\s*%",
+            r"(\d{1,3})\s*%[^.\n]{0,30}(?:administrative|admin|overhead|indirect)",
         ],
         "reference": "FCRA 2010 s.8 (as amended 2020) — admin cap reduced 50% → 20%",
         "explanation": (

@@ -31,22 +31,39 @@ CONFIG_PATH = CONFIG_DIR / "config.json"
 # Default provider preference and model names. "auto" = detect Ollama, else
 # Gemini, else the local rules engine.
 DEFAULTS = {
-    "provider": "auto",            # auto | ollama | gemini | openai | claude | local
+    # auto | ollama | gemini | openai | github | claude | local
+    "provider": "auto",
     "gemini_api_key": "",
     "gemini_model": "gemini-2.5-flash",
+    # OpenAI-compatible: OpenAI, OpenRouter, Groq, Mistral, SiliconFlow, …
     "openai_api_key": "",
     "openai_model": "gpt-4o-mini",
+    "openai_base_url": "https://api.openai.com/v1",
+    # GitHub Models (authenticated with a GitHub PAT).
+    "github_token": "",
+    "github_model": "openai/gpt-4o-mini",
+    "github_base_url": "https://models.github.ai/inference",
     "anthropic_api_key": "",
     "anthropic_model": "claude-haiku-4-5-20251001",
     "ollama_model": "llama3.1",
     "ollama_host": "http://localhost:11434",
+    # Access control (only effective when Google Sign-In is configured in
+    # .streamlit/secrets.toml). require_login gates the whole app; admin_emails
+    # (comma-separated) restricts the Usage page.
+    "require_login": False,
+    "admin_emails": "",
 }
 
 # Which environment variable backs each provider's API key, used as a fallback
-# when the config file doesn't carry the secret. The first hit wins.
+# when the config file doesn't carry the secret. The first hit wins. The
+# OpenAI-compatible provider accepts several common vendor env names so a key
+# already exported for Groq/OpenRouter/etc. is picked up automatically.
 ENV_KEYS = {
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
-    "openai": ("OPENAI_API_KEY",),
+    "openai": ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "GROQ_API_KEY",
+               "MISTRAL_API_KEY", "SILICONFLOW_API_KEY", "TOGETHER_API_KEY",
+               "DEEPSEEK_API_KEY"),
+    "github": ("GITHUB_MODELS_TOKEN", "GITHUB_TOKEN"),
     "claude": ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
 }
 
@@ -54,6 +71,7 @@ ENV_KEYS = {
 _KEY_FIELD = {
     "gemini": "gemini_api_key",
     "openai": "openai_api_key",
+    "github": "github_token",
     "claude": "anthropic_api_key",
 }
 

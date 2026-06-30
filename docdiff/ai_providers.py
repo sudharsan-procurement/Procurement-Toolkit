@@ -450,66 +450,179 @@ def _short_error(e: Exception) -> str:
     return msg[:200]
 
 
-# --- Cloud placeholders (subclass the LLM base; wire up later) -----------------
-class OpenAIProvider(LLMProvider):
-    """Placeholder. The structure is here; only `_chat`/`available` need wiring.
+# --- OpenAI-compatible provider (OpenAI / OpenRouter / Groq / Mistral / …) -----
+# Common base URLs for the OpenAI Chat Completions API. The user can pick one of
+# these (or enter a custom URL) in Settings and bring THEIR OWN free key.
+OPENAI_COMPATIBLE_PRESETS = {
+    "OpenAI": "https://api.openai.com/v1",
+    "OpenRouter": "https://openrouter.ai/api/v1",
+    "Groq": "https://api.groq.com/openai/v1",
+    "Mistral": "https://api.mistral.ai/v1",
+    "SiliconFlow": "https://api.siliconflow.com/v1",
+    "Together": "https://api.together.xyz/v1",
+    "DeepSeek": "https://api.deepseek.com/v1",
+}
 
-    To enable: implement `_chat` against the OpenAI Chat Completions API using
-    `self.api_key` / `self.model`, and have `available()` return bool(self.api_key).
+
+class OpenAICompatibleProvider(LLMProvider):
+    """Any service that speaks the OpenAI `/chat/completions` API.
+
+    One class serves OpenAI, OpenRouter, Groq, Mistral, SiliconFlow, Together,
+    DeepSeek and local OpenAI-style servers — only base_url / api_key / model
+    differ. Uses plain `requests` (no SDK), like the rest of the app. Bring your
+    OWN key from the provider; never paste keys harvested from public sites.
     """
 
-    name = "OpenAI (cloud LLM) — coming soon"
+    name = "OpenAI-compatible (cloud LLM)"
     is_cloud = True
-    implemented = False
+    DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
-    def __init__(self, api_key: str = "", model: str = "gpt-4o-mini"):
+    def __init__(self, api_key: str = "", model: str = "gpt-4o-mini",
+                 base_url: str = "", label: str | None = None,
+                 auth_extra: dict | None = None):
         self.api_key = (api_key or "").strip()
-        self.model = model
+        self.model = model or "gpt-4o-mini"
+        self.base_url = (base_url or self.DEFAULT_BASE_URL).rstrip("/")
+        if label:
+            self.name = label
+        self._auth_extra = auth_extra or {}
 
     def available(self) -> bool:
-        return False  # not implemented yet
+        return bool(self.api_key)
+
+    def _headers(self) -> dict:
+        h = {"Authorization": f"Bearer {self.api_key}",
+             "Content-Type": "application/json"}
+        h.update(self._auth_extra)
+        return h
 
     def _chat(self, prompt: str, expect_json: bool = False) -> str:
-        raise NotImplementedError("OpenAI provider is not implemented yet.")
+        import requests
+        payload = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}],
+            # We DON'T send response_format=json_object: many free/community
+            # OpenAI-compatible models reject it. The prompt asks for JSON and
+            # parse_extract_json() tolerates ``` fences, so this stays portable.
+            "temperature": 0.1 if expect_json else 0.2,
+        }
+        r = requests.post(f"{self.base_url}/chat/completions",
+                          headers=self._headers(), json=payload, timeout=90)
+        r.raise_for_status()
+        return _openai_text(r.json())
 
     def test_connection(self) -> tuple[bool, str]:
-        return False, "OpenAI support is planned but not implemented yet."
+        if not self.api_key:
+            return False, f"No API key configured for {self.name}."
+        try:
+            reply = self._chat("Reply with the single word: OK")
+            if reply:
+                return True, f"Connected to {self.name} (model: {self.model})."
+            return False, f"{self.name} responded but returned no text."
+        except Exception as e:  # noqa: BLE001
+            return False, f"{self.name} connection failed: {_short_error(e)}"
 
 
-class ClaudeProvider(LLMProvider):
-    """Placeholder. The structure is here; only `_chat`/`available` need wiring.
+class GitHubModelsProvider(OpenAICompatibleProvider):
+    """GitHub Models — free hosted models authenticated with a GitHub PAT.
 
-    To enable: implement `_chat` against the Anthropic Messages API using
-    `self.api_key` / `self.model`, and have `available()` return bool(self.api_key).
+    GitHub Models exposes an OpenAI-compatible endpoint, so we reuse the base
+    class and just point it at the GitHub inference URL with the PAT as the
+    bearer token. Model ids are namespaced, e.g. 'openai/gpt-4o-mini',
+    'meta/Llama-3.3-70B-Instruct', 'microsoft/Phi-3.5-mini-instruct'.
+    Create a fine-grained PAT with 'Models' read access at github.com/settings.
     """
 
-    name = "Claude (cloud LLM) — coming soon"
+    name = "GitHub Models (cloud LLM)"
+    DEFAULT_BASE_URL = "https://models.github.ai/inference"
+
+    def __init__(self, token: str = "", model: str = "openai/gpt-4o-mini",
+                 base_url: str = ""):
+        model = model or "openai/gpt-4o-mini"
+        super().__init__(api_key=token, model=model,
+                         base_url=base_url or self.DEFAULT_BASE_URL,
+                         label=f"GitHub Models · {model} (cloud LLM)")
+
+
+def _openai_text(data: dict) -> str:
+    """Pull the assistant text out of an OpenAI-style response (or raise)."""
+    choices = data.get("choices") or []
+    if not choices:
+        reason = (data.get("error") or {}).get("message")
+        raise RuntimeError(f"No choices returned ({reason or 'unknown reason'}).")
+    message = choices[0].get("message") or {}
+    return message.get("content") or ""
+
+
+# --- Claude provider (Anthropic Messages API) ---------------------------------
+class ClaudeProvider(LLMProvider):
+    """Anthropic Claude via the Messages REST API (plain `requests`, no SDK)."""
+
+    name = "Claude (cloud LLM)"
     is_cloud = True
-    implemented = False
+    _ENDPOINT = "https://api.anthropic.com/v1/messages"
+    _API_VERSION = "2023-06-01"
 
     def __init__(self, api_key: str = "", model: str = "claude-haiku-4-5-20251001"):
         self.api_key = (api_key or "").strip()
-        self.model = model
+        self.model = model or "claude-haiku-4-5-20251001"
+        self.name = f"Claude {self.model} (cloud LLM)"
 
     def available(self) -> bool:
-        return False  # not implemented yet
+        return bool(self.api_key)
 
     def _chat(self, prompt: str, expect_json: bool = False) -> str:
-        raise NotImplementedError("Claude provider is not implemented yet.")
+        import requests
+        payload = {
+            "model": self.model,
+            "max_tokens": 2048,
+            "temperature": 0.1 if expect_json else 0.2,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        r = requests.post(
+            self._ENDPOINT,
+            headers={
+                "x-api-key": self.api_key,
+                "anthropic-version": self._API_VERSION,
+                "content-type": "application/json",
+            },
+            json=payload,
+            timeout=90,
+        )
+        r.raise_for_status()
+        return _claude_text(r.json())
 
     def test_connection(self) -> tuple[bool, str]:
-        return False, "Claude support is planned but not implemented yet."
+        if not self.api_key:
+            return False, "No Claude (Anthropic) API key configured."
+        try:
+            reply = self._chat("Reply with the single word: OK")
+            if reply:
+                return True, f"Connected to Claude ({self.model})."
+            return False, "Claude responded but returned no text."
+        except Exception as e:  # noqa: BLE001
+            return False, f"Claude connection failed: {_short_error(e)}"
+
+
+def _claude_text(data: dict) -> str:
+    """Pull text out of an Anthropic Messages response (or raise)."""
+    blocks = data.get("content")
+    if not blocks:
+        reason = (data.get("error") or {}).get("message")
+        raise RuntimeError(f"Claude returned no content ({reason or 'unknown reason'}).")
+    return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
 
 
 # --- Provider selection + status ----------------------------------------------
 # A registry so the Settings page can list providers without hard-coding them,
 # and so a new provider is added in exactly one place.
 PROVIDER_CHOICES = [
-    ("auto", "Auto-detect (Ollama → Gemini → Local)"),
+    ("auto", "Auto-detect (Ollama → Gemini → OpenAI-compatible → GitHub → Local)"),
     ("ollama", "Ollama (local AI)"),
     ("gemini", "Gemini (cloud AI)"),
-    ("openai", "OpenAI (cloud AI) — coming soon"),
-    ("claude", "Claude (cloud AI) — coming soon"),
+    ("openai", "OpenAI-compatible (OpenAI / OpenRouter / Groq / Mistral / SiliconFlow)"),
+    ("github", "GitHub Models (GitHub PAT)"),
+    ("claude", "Claude (Anthropic) (cloud AI)"),
     ("local", "Local rules only (no LLM)"),
 ]
 
@@ -534,6 +647,32 @@ def _ollama_from_settings(settings: dict) -> OllamaProvider:
                           host=settings.get("ollama_host") or "http://localhost:11434")
 
 
+def _openai_from_settings(settings: dict) -> OpenAICompatibleProvider:
+    base_url = (settings.get("openai_base_url")
+                or OpenAICompatibleProvider.DEFAULT_BASE_URL)
+    # Name the provider after its host so the status badge is meaningful.
+    host = re.sub(r"^https?://(www\.)?", "", base_url).split("/")[0]
+    return OpenAICompatibleProvider(
+        api_key=get_api_key("openai", settings),
+        model=settings.get("openai_model") or "gpt-4o-mini",
+        base_url=base_url,
+        label=f"OpenAI-compatible · {host} (cloud LLM)",
+    )
+
+
+def _github_from_settings(settings: dict) -> GitHubModelsProvider:
+    return GitHubModelsProvider(
+        token=get_api_key("github", settings),
+        model=settings.get("github_model") or "openai/gpt-4o-mini",
+        base_url=settings.get("github_base_url") or "")
+
+
+def _claude_from_settings(settings: dict) -> ClaudeProvider:
+    return ClaudeProvider(
+        api_key=get_api_key("claude", settings),
+        model=settings.get("anthropic_model") or "claude-haiku-4-5-20251001")
+
+
 def resolve_provider(settings: dict | None = None) -> ProviderStatus:
     """Pick the active provider from saved settings, applying fallback rules.
 
@@ -548,14 +687,44 @@ def resolve_provider(settings: dict | None = None) -> ProviderStatus:
 
     gemini = _gemini_from_settings(settings)
     has_gemini = gemini.available()
+    openai = _openai_from_settings(settings)
+    has_openai = openai.available()
+    github = _github_from_settings(settings)
+    has_github = github.available()
+    claude = _claude_from_settings(settings)
+    has_claude = claude.available()
 
     def gemini_status(level="ok", messages=None):
         return ProviderStatus(gemini, "✓ Gemini Connected (Cloud AI)", level,
                               messages or [])
 
+    def openai_status(level="ok", messages=None):
+        return ProviderStatus(openai, "✓ OpenAI-compatible Connected (Cloud AI)",
+                              level, messages or [])
+
+    def github_status(level="ok", messages=None):
+        return ProviderStatus(github, "✓ GitHub Models Connected (Cloud AI)",
+                              level, messages or [])
+
+    def claude_status(level="ok", messages=None):
+        return ProviderStatus(claude, "✓ Claude Connected (Cloud AI)",
+                              level, messages or [])
+
     def local_status(level="warn", messages=None):
         return ProviderStatus(LocalHeuristicProvider(),
                               "⚠ No AI Provider Configured", level, messages or [])
+
+    # Best available cloud provider, used as a fallback target.
+    def first_cloud(level, messages):
+        if has_gemini:
+            return gemini_status(level, messages)
+        if has_openai:
+            return openai_status(level, messages)
+        if has_github:
+            return github_status(level, messages)
+        if has_claude:
+            return claude_status(level, messages)
+        return None
 
     # Explicit "local rules only".
     if pref == "local":
@@ -569,38 +738,53 @@ def resolve_provider(settings: dict | None = None) -> ProviderStatus:
         return local_status("error",
                             ["Please configure a Gemini API key in Settings."])
 
+    # Explicit OpenAI-compatible (OpenAI / OpenRouter / Groq / Mistral / …).
+    if pref == "openai":
+        if has_openai:
+            return openai_status()
+        return local_status("error", [
+            "Please add an OpenAI-compatible API key (and base URL) in Settings."])
+
+    # Explicit GitHub Models.
+    if pref == "github":
+        if has_github:
+            return github_status()
+        return local_status("error",
+                            ["Please add a GitHub personal access token in Settings."])
+
     # Explicit Ollama — the OPTIONAL local engine, with cloud fallback.
     if pref == "ollama":
         ollama = _ollama_from_settings(settings)
         if ollama.available():
             return ProviderStatus(ollama, "✓ Ollama Available (Local AI)", "ok", [])
-        if has_gemini:
-            return gemini_status(
-                "warn",
-                ["Local AI (Ollama) is not available. Switching to Gemini Cloud AI."])
+        switched = first_cloud(
+            "warn", ["Local AI (Ollama) is not available. Switching to cloud AI."])
+        if switched:
+            return switched
         return local_status("error", [
             "Local AI (Ollama) is not available.",
-            "Please configure a Gemini API key in Settings.",
+            "Please configure a cloud provider (Gemini / OpenAI-compatible / "
+            "GitHub) in Settings.",
         ])
 
-    # Placeholders: not implemented → behave like auto, but explain why.
-    if pref in ("openai", "claude"):
-        note = (f"{pref.capitalize()} support is not implemented yet — "
-                "using the best available provider instead.")
-        if has_gemini:
-            return gemini_status("warn", [note])
-        return local_status("warn", [note])
+    # Explicit Claude (Anthropic).
+    if pref == "claude":
+        if has_claude:
+            return claude_status()
+        return local_status("error",
+                            ["Please configure a Claude (Anthropic) API key in Settings."])
 
-    # Default: auto-detect.
+    # Default: auto-detect (Ollama → Gemini → OpenAI-compatible → GitHub → Local).
     ollama = _ollama_from_settings(settings)
     if ollama.available():
         return ProviderStatus(ollama, "✓ Ollama Available (Local AI)", "ok", [])
-    if has_gemini:
-        return gemini_status()
+    chosen = first_cloud("ok", [])
+    if chosen:
+        return chosen
     return local_status("warn", [
-        "No local Ollama and no Gemini key found — using the built-in rules "
-        "engine (works, but without LLM reasoning). Add a Gemini API key in "
-        "Settings for cloud AI.",
+        "No local Ollama and no cloud key found — using the built-in rules "
+        "engine (works, but without LLM reasoning). Add a Gemini / "
+        "OpenAI-compatible / GitHub key in Settings for cloud AI.",
     ])
 
 
@@ -612,12 +796,11 @@ def build_provider(provider_id: str, settings: dict | None = None) -> AIProvider
     if provider_id == "ollama":
         return _ollama_from_settings(settings)
     if provider_id == "openai":
-        return OpenAIProvider(api_key=get_api_key("openai", settings),
-                              model=settings.get("openai_model") or "gpt-4o-mini")
+        return _openai_from_settings(settings)
+    if provider_id == "github":
+        return _github_from_settings(settings)
     if provider_id == "claude":
-        return ClaudeProvider(api_key=get_api_key("claude", settings),
-                              model=settings.get("anthropic_model")
-                              or "claude-haiku-4-5-20251001")
+        return _claude_from_settings(settings)
     return LocalHeuristicProvider()
 
 

@@ -56,8 +56,13 @@ Then open the link it prints (usually http://localhost:8501).
 To sanity-check the engine without the UI or the model:
 
 ```bash
-python selftest.py
+python selftest.py       # core diff pipeline on the sample contracts
+python selftest_ai.py    # AI providers, fallback logic, FCRA engine, analytics
 ```
+
+`selftest_ai.py` mocks `requests`, so it checks each provider's request shape and
+response parsing (Gemini / OpenAI-compatible / GitHub Models / Claude / Ollama)
+offline — no keys or network needed.
 
 ---
 
@@ -91,8 +96,10 @@ background services.
 |---|---|---|---|
 | **Local rules** (`LocalHeuristicProvider`) | In-process | nothing | Always-on safety net; no LLM reasoning |
 | **Gemini** (`GeminiProvider`) | Google cloud | an API key + outbound HTTPS | **Corporate laptops** — no install, no admin rights |
+| **OpenAI-compatible** (`OpenAICompatibleProvider`) | Cloud | your own key + base URL | OpenRouter / Groq / Mistral / SiliconFlow / OpenAI / DeepSeek — free tiers |
+| **GitHub Models** (`GitHubModelsProvider`) | Cloud | a GitHub PAT (Models read) | Devs who already have a GitHub account |
+| **Claude** (`ClaudeProvider`) | Anthropic cloud | an Anthropic API key | High-quality reasoning |
 | **Ollama** (`OllamaProvider`) | Your machine | a local Ollama install | Fully offline LLM reasoning |
-| **OpenAI / Claude** | Cloud | _placeholders_ | Wired up later (structure is in place) |
 
 All LLM providers share the same procurement prompts and JSON parsing, so they
 behave identically — only the transport differs. Document reading and OCR always
@@ -111,6 +118,44 @@ in Settings (e.g. `gemini-2.5-pro`). Instead of pasting the key you may set the
 `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) environment variable — the app reads the
 saved config first, then falls back to the environment.
 
+### Use an OpenAI-compatible provider (OpenRouter / Groq / Mistral / SiliconFlow / OpenAI)
+
+Many providers expose the same OpenAI `/chat/completions` API, so one provider
+covers them all — you just pick the service and bring **your own** free key:
+
+1. Create a free key from the provider (e.g. [OpenRouter](https://openrouter.ai/keys),
+   [Groq](https://console.groq.com/keys), [Mistral](https://console.mistral.ai),
+   [SiliconFlow](https://siliconflow.com)).
+2. In **⚙️ Settings → OpenAI-compatible**, pick the **Service** (this sets the
+   base URL), paste your key, and set the **Model** (e.g. Groq
+   `llama-3.3-70b-versatile`, OpenRouter `meta-llama/llama-3.3-70b-instruct:free`).
+3. **Test connection** → **Save**. Status shows **✓ OpenAI-compatible Connected**.
+
+The key may also come from an environment variable (`OPENAI_API_KEY`,
+`OPENROUTER_API_KEY`, `GROQ_API_KEY`, `MISTRAL_API_KEY`, `SILICONFLOW_API_KEY`, …).
+
+### Use GitHub Models (GitHub PAT)
+
+1. Create a fine-grained **GitHub personal access token** with **Models** read
+   access at <https://github.com/settings/personal-access-tokens>.
+2. In **⚙️ Settings → GitHub Models**, paste the PAT and set a model
+   (e.g. `openai/gpt-4o-mini`, `meta/Llama-3.3-70B-Instruct`).
+3. **Test connection** → **Save**. (Env var: `GITHUB_MODELS_TOKEN` / `GITHUB_TOKEN`.)
+
+> ⚠️ **Don't paste API keys harvested from public sites / "free key" repos.**
+> Those are typically shared, expire within hours, breach the providers' terms,
+> and — worst for this app — route your **contract / FCRA documents through an
+> unknown third party**. Always generate your own key from the provider above.
+> If a key doesn't start with `AIza`, it is *not* a Google key and won't work in
+> the Gemini field (the app warns you about this).
+
+### Use Claude (Anthropic)
+
+1. Create a key at <https://console.anthropic.com> (starts with `sk-ant-`).
+2. In **⚙️ Settings → Claude (Anthropic)**, paste the key and set a model
+   (e.g. `claude-haiku-4-5-20251001`). **Test connection** → **Save**.
+3. Status shows **✓ Claude Connected (Cloud AI)**. (Env var: `ANTHROPIC_API_KEY`.)
+
 ### Use Ollama (optional, fully local)
 
 1. Install **Ollama** from <https://ollama.com> and run `ollama pull llama3.1`.
@@ -121,13 +166,14 @@ saved config first, then falls back to the environment.
 
 The provider is chosen by `resolve_provider()` from your saved settings:
 
-- **Auto-detect** (default): a running **Ollama → Gemini (if a key is set) →
-  Local rules**.
+- **Auto-detect** (default): a running **Ollama → Gemini → OpenAI-compatible →
+  GitHub Models → Local rules** (first one with a key/that's reachable wins).
 - **Ollama** selected but **not reachable**: the app automatically switches to
-  Gemini when a key is configured — *"Local AI (Ollama) is not available.
-  Switching to Gemini Cloud AI."* — otherwise it drops to the local rules engine.
-- **Gemini** selected but **no key**: *"Please configure a Gemini API key in
-  Settings."* and the local rules engine is used so the app still works.
+  the first configured cloud provider — *"Local AI (Ollama) is not available.
+  Switching to cloud AI."* — otherwise it drops to the local rules engine.
+- A cloud provider selected but **no key**: a clear message (e.g. *"Please
+  configure a Gemini API key in Settings."*) and the local rules engine is used
+  so the app still works.
 
 The sidebar and the AI Quote Analysis page always show a clear status badge:
 **✓ Ollama Available (Local AI)**, **✓ Gemini Connected (Cloud AI)**, or
@@ -185,13 +231,55 @@ freezing a snapshot of the law in code.
 
 ---
 
-### Adding another provider (e.g. enabling OpenAI/Claude)
+---
 
-`OpenAIProvider` and `ClaudeProvider` already subclass the shared `LLMProvider`
-base. To enable one, implement its `_chat()` against the vendor's API and have
-`available()` return `bool(self.api_key)` — the extraction, recommendation, and
-reasoning logic is inherited unchanged, and it's already registered in
-`PROVIDER_CHOICES` for the Settings dropdown.
+## Usage analytics (daily access count)
+
+The **📊 Usage** page shows how many people accessed the app, per day:
+
+- **Sessions** — browser/tab loads (anonymous + signed-in). Counted once per
+  Streamlit session.
+- **Signed-in users** — distinct user identities; populated only when Google
+  Sign-In is enabled (see below).
+
+Visits are logged to a local SQLite file (`~/.smartdoc/analytics.db`) by
+`docdiff/analytics.py`. It's a lightweight built-in counter, **not** a
+replacement for a full analytics product — the numbers reflect the running
+instance and can reset if the host restarts (common on free cloud tiers). Set
+**Admin emails** in Settings to restrict the Usage page to specific accounts.
+
+## Google Sign-In (optional)
+
+Sign-in is **off by default** and the app runs anonymously. When configured, it
+uses Streamlit's native OIDC auth (`st.login` / `st.user`, Streamlit ≥ 1.42) and
+lets the Usage page count **unique users**.
+
+To enable it:
+
+1. Create an OAuth client in the **Google Cloud Console** (APIs & Services →
+   Credentials → OAuth client ID → *Web application*). Add the redirect URI
+   `http://localhost:8501/oauth2callback` (and your deployed URL's
+   `/oauth2callback`).
+2. Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and fill
+   in `client_id`, `client_secret`, a random `cookie_secret`, and your
+   `redirect_uri`. (This file is git-ignored — never commit secrets.)
+3. Restart the app. A **🔐 Sign in with Google** button appears in the sidebar.
+4. Optionally, in **⚙️ Settings → Access & sign-in**, turn on *Require sign-in*
+   to gate the whole app, and set *Admin emails* for the Usage page.
+
+> Heads-up: the `redirect_uri` must exactly match the Google console entry for
+> each environment (localhost vs deployed). Auth needs `Authlib` (in
+> `requirements.txt`).
+
+### Adding another provider
+
+The shared `LLMProvider` base already implements extraction, recommendation, and
+reasoning — a concrete provider only implements `available()` and `_chat()`. Most
+new cloud services are OpenAI-compatible, so they need **no new class at all**:
+just add a base URL to `OPENAI_COMPATIBLE_PRESETS` (or type a custom URL in
+Settings). `ClaudeProvider` remains a placeholder (Anthropic's Messages API has a
+different shape); to enable it, implement its `_chat()` — it's already registered
+in `PROVIDER_CHOICES`.
 
 ---
 
@@ -210,7 +298,8 @@ docdiff/
   settings.py          Local config + API-key resolution (file → env var)
   quote_intelligence.py Provider-independent quote scoring / ranking / risk
 samples/               Two example contracts for testing
-selftest.py            Runs the engine on the samples and prints results
+selftest.py            Runs the diff engine on the samples and prints results
+selftest_ai.py         Offline checks for the AI providers / FCRA / analytics
 requirements.txt       The packages to install
 ```
 

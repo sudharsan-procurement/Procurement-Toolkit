@@ -234,13 +234,140 @@ def _render_executive_summary(changes):
     _copy_button(summary_to_text(summary), key="exec_summary")
 
 
+# ---------------- Authentication (optional Google Sign-In) ------------------
+# Uses Streamlit's native OIDC auth (st.login / st.user), available in Streamlit
+# >= 1.42 and active only when [auth] is configured in .streamlit/secrets.toml.
+# Everything degrades gracefully: with no auth configured the app runs anonymously
+# exactly as before.
+
+def _auth_supported() -> bool:
+    return hasattr(st, "login") and hasattr(st, "user")
+
+
+def _auth_configured() -> bool:
+    if not _auth_supported():
+        return False
+    try:
+        return "auth" in st.secrets
+    except Exception:
+        return False
+
+
+def _current_identity():
+    """The signed-in user's email, or None if not signed in / auth off."""
+    if not _auth_supported():
+        return None
+    try:
+        if getattr(st.user, "is_logged_in", False):
+            return getattr(st.user, "email", None) or getattr(st.user, "sub", None)
+    except Exception:
+        return None
+    return None
+
+
+def _track_visit():
+    """Record one analytics visit per browser session (and on sign-in)."""
+    import uuid
+    from docdiff import analytics
+
+    if "sid" not in st.session_state:
+        st.session_state.sid = uuid.uuid4().hex
+    identity = _current_identity()
+    key = (st.session_state.sid, identity)
+    if st.session_state.get("_visit_key") != key:
+        analytics.record_visit(st.session_state.sid, identity)
+        st.session_state._visit_key = key
+
+
+def _maybe_require_login():
+    """If sign-in is configured AND required, gate the app behind Google login."""
+    if not _auth_configured():
+        return
+    from docdiff import settings as cfg
+    if not cfg.load_settings().get("require_login"):
+        return
+    if _current_identity():
+        return
+    st.title("🔐 Sign in required")
+    st.write("Please sign in with your Google account to use this app.")
+    if st.button("Sign in with Google", type="primary"):
+        st.login("google")
+    st.stop()
+
+
+def _render_account():
+    """Sidebar sign-in / sign-out controls (only when auth is configured)."""
+    if not _auth_configured():
+        return
+    st.divider()
+    ident = _current_identity()
+    if ident:
+        st.caption(f"👤 {ident}")
+        if st.button("Log out", use_container_width=True):
+            st.logout()
+    else:
+        if st.button("🔐 Sign in with Google", use_container_width=True):
+            st.login("google")
+
+
+def render_usage():
+    st.title("📊 Usage")
+    st.caption("How many people accessed the app, per day.")
+
+    from docdiff import analytics
+    from docdiff import settings as cfg
+
+    # Optional admin gate for this page.
+    admins = [e.strip().lower()
+              for e in (cfg.load_settings().get("admin_emails") or "").split(",")
+              if e.strip()]
+    if admins:
+        ident = _current_identity()
+        if not ident or ident.lower() not in admins:
+            st.warning("This page is restricted to administrators. Sign in with "
+                       "an authorised account to view usage.")
+            return
+
+    today = analytics.counts_for()
+    tot = analytics.totals()
+    cols = st.columns(4)
+    cols[0].metric("Today — sessions", today["sessions"])
+    cols[1].metric("Today — signed-in users", today["users"])
+    cols[2].metric("All-time sessions", tot["sessions"])
+    cols[3].metric("All-time users", tot["users"])
+
+    days = st.slider("Days to show", 7, 90, 30)
+    data = analytics.daily_counts(days)
+    if not data:
+        st.info("No visits recorded yet. Numbers appear as people open the app.")
+    else:
+        import pandas as pd
+        df = pd.DataFrame(data).set_index("day")
+        st.bar_chart(df[["sessions", "users"]])
+        st.dataframe(df.reset_index().rename(
+            columns={"day": "Day", "sessions": "Sessions", "users": "Signed-in users"}),
+            use_container_width=True, hide_index=True)
+
+    st.caption(
+        "**Sessions** = browser/tab loads (anonymous + signed-in). **Users** = "
+        "distinct signed-in identities — available only when Google Sign-In is "
+        "enabled. Counts are for this running instance and may reset if the host "
+        "restarts; for production-grade analytics use a dedicated tool."
+    )
+    if not _auth_configured():
+        st.info("💡 Enable Google Sign-In (see README) to count **unique users** "
+                "rather than just sessions.")
+
+
 def main():
     """Pick a toolkit section and a tool from the sidebar, then show it."""
+    _maybe_require_login()
+    _track_visit()
     with st.sidebar:
         st.title("🧰 Document Toolkit")
         section = st.radio(
             "Toolkit",
-            ["Document Tools", "Procurement Toolkit", "⚙️ Settings"],
+            ["Document Tools", "Procurement Toolkit", "📊 Usage", "⚙️ Settings"],
         )
         st.divider()
         if section == "Document Tools":
@@ -256,9 +383,10 @@ def main():
                  "✅ PO vs Invoice Validator"],
             )
         else:
-            tool = "⚙️ Settings"
+            tool = section  # "📊 Usage" or "⚙️ Settings"
         st.divider()
         _render_ai_status_badge()
+        _render_account()
 
     dispatch = {
         "📑 Compare documents": render_compare,
@@ -269,6 +397,7 @@ def main():
         "🤖 AI Quote Analysis": render_ai_quote_analysis,
         "🧮 Quote Comparison": render_quote_comparison,
         "✅ PO vs Invoice Validator": render_po_validator,
+        "📊 Usage": render_usage,
         "⚙️ Settings": render_settings,
     }
     dispatch[tool]()
@@ -857,6 +986,7 @@ def render_settings():
 
     from docdiff.ai_providers import (
         PROVIDER_CHOICES, resolve_provider, build_provider, DEFAULT_GEMINI_MODEL,
+        OPENAI_COMPATIBLE_PRESETS,
     )
     from docdiff import settings as cfg
 
@@ -902,9 +1032,91 @@ def render_settings():
         help="Get a free key at https://aistudio.google.com/apikey. Stored "
              "locally in your user config file — never committed to the repo.",
     )
+    # Guard: a Google AI Studio key looks like 'AIza…'. Keys harvested from other
+    # sites/services won't work here and shouldn't be pasted into this field.
+    if gemini_key.strip() and not gemini_key.strip().startswith("AIza"):
+        st.warning(
+            "⚠️ This doesn't look like a Google AI Studio key (those start with "
+            "`AIza`). A key for another service (e.g. an `sk-…` token) won't work "
+            "in the Gemini field — use the **OpenAI-compatible** or **GitHub "
+            "Models** section below instead. Never paste keys harvested from "
+            "public sites: they're shared, expire fast, and route your documents "
+            "through an unknown third party."
+        )
     gemini_model = st.text_input(
         "Gemini model", value=current.get("gemini_model") or DEFAULT_GEMINI_MODEL,
         help="e.g. gemini-2.5-flash (fast, recommended) or gemini-2.5-pro.",
+    )
+
+    # --- OpenAI-compatible (OpenAI / OpenRouter / Groq / Mistral / SiliconFlow) -
+    st.subheader("OpenAI-compatible (OpenRouter / Groq / Mistral / SiliconFlow / OpenAI)")
+    st.caption("Bring your OWN free key from the provider. One endpoint shape "
+               "serves them all — just pick the service and paste your key.")
+    preset_names = list(OPENAI_COMPATIBLE_PRESETS) + ["Custom…"]
+    cur_base = current.get("openai_base_url") or OPENAI_COMPATIBLE_PRESETS["OpenAI"]
+    cur_preset = next((n for n, u in OPENAI_COMPATIBLE_PRESETS.items()
+                       if u == cur_base), "Custom…")
+    preset = st.selectbox("Service", preset_names,
+                          index=preset_names.index(cur_preset))
+    if preset == "Custom…":
+        openai_base_url = st.text_input(
+            "Base URL", value=cur_base,
+            help="Any OpenAI-compatible /v1 endpoint.")
+    else:
+        openai_base_url = OPENAI_COMPATIBLE_PRESETS[preset]
+        st.caption(f"Base URL: `{openai_base_url}`")
+    openai_key = st.text_input(
+        "API key", value=current.get("openai_api_key", ""), type="password",
+        key="set_openai_key",
+        help="OpenRouter: openrouter.ai/keys · Groq: console.groq.com/keys · "
+             "Mistral: console.mistral.ai · SiliconFlow: siliconflow.com",
+    )
+    openai_model = st.text_input(
+        "Model", value=current.get("openai_model") or "gpt-4o-mini",
+        key="set_openai_model",
+        help="e.g. OpenRouter `meta-llama/llama-3.3-70b-instruct:free` · "
+             "Groq `llama-3.3-70b-versatile` · Mistral `mistral-small-latest` · "
+             "OpenAI `gpt-4o-mini`.",
+    )
+
+    # --- GitHub Models (GitHub PAT) ------------------------------------------
+    st.subheader("GitHub Models (GitHub PAT)")
+    st.caption("Free hosted models authenticated with a GitHub personal access "
+               "token (fine-grained, with **Models** read access).")
+    gh_src = cfg.key_source("github", current)
+    if gh_src == "environment":
+        st.info("A GitHub token was found in your environment "
+                "(GITHUB_MODELS_TOKEN / GITHUB_TOKEN). Leave the box blank to keep "
+                "using it, or enter one here to override it.")
+    github_token = st.text_input(
+        "GitHub PAT", value=current.get("github_token", ""), type="password",
+        help="Create at github.com/settings/personal-access-tokens with Models "
+             "read access.",
+    )
+    if github_token.strip() and not github_token.strip().startswith(
+            ("ghp_", "github_pat_", "gho_")):
+        st.caption("Tip: GitHub PATs usually start with `ghp_` or `github_pat_`.")
+    github_model = st.text_input(
+        "GitHub model", value=current.get("github_model") or "openai/gpt-4o-mini",
+        help="Namespaced ids, e.g. `openai/gpt-4o-mini`, "
+             "`meta/Llama-3.3-70B-Instruct`, `microsoft/Phi-3.5-mini-instruct`.",
+    )
+
+    # --- Claude (Anthropic) ---------------------------------------------------
+    st.subheader("Claude (Anthropic)")
+    claude_src = cfg.key_source("claude", current)
+    if claude_src == "environment":
+        st.info("A Claude API key was found in your environment "
+                "(ANTHROPIC_API_KEY). Leave the box blank to keep using it.")
+    claude_key = st.text_input(
+        "Anthropic API key", value=current.get("anthropic_api_key", ""),
+        type="password",
+        help="Get a key at https://console.anthropic.com. Keys start with "
+             "`sk-ant-`.",
+    )
+    claude_model = st.text_input(
+        "Claude model", value=current.get("anthropic_model") or "claude-haiku-4-5-20251001",
+        help="e.g. claude-haiku-4-5-20251001 (fast) or a Sonnet/Opus model id.",
     )
 
     # --- Ollama (optional) ---
@@ -918,12 +1130,41 @@ def render_settings():
             "Ollama host", value=current.get("ollama_host") or "http://localhost:11434",
             key="set_ollama_host")
 
+    # --- Access & sign-in (only effective when Google auth is configured) -----
+    with st.expander("Access & sign-in (Google)"):
+        if _auth_configured():
+            st.success("Google Sign-In is configured (.streamlit/secrets.toml).")
+        else:
+            st.caption("Google Sign-In is **not** configured. Add an `[auth]` "
+                       "section to `.streamlit/secrets.toml` (see README) to "
+                       "enable these options. The app works fine without it.")
+        require_login = st.checkbox(
+            "Require sign-in to use the app",
+            value=bool(current.get("require_login")),
+            help="When on (and Google auth is configured), users must sign in "
+                 "before they can use any tool.",
+        )
+        admin_emails = st.text_input(
+            "Admin emails (comma-separated)",
+            value=current.get("admin_emails", ""),
+            help="If set, only these signed-in emails can view the 📊 Usage page.",
+        )
+
     # Assemble the to-be-saved settings from the form.
     new_settings = dict(current)
     new_settings.update({
+        "require_login": require_login,
+        "admin_emails": admin_emails.strip(),
         "provider": chosen,
         "gemini_api_key": gemini_key.strip(),
         "gemini_model": gemini_model.strip() or DEFAULT_GEMINI_MODEL,
+        "openai_api_key": openai_key.strip(),
+        "openai_model": openai_model.strip() or "gpt-4o-mini",
+        "openai_base_url": openai_base_url.strip() or OPENAI_COMPATIBLE_PRESETS["OpenAI"],
+        "github_token": github_token.strip(),
+        "github_model": github_model.strip() or "openai/gpt-4o-mini",
+        "anthropic_api_key": claude_key.strip(),
+        "anthropic_model": claude_model.strip() or "claude-haiku-4-5-20251001",
         "ollama_model": ollama_model.strip() or "llama3.1",
         "ollama_host": ollama_host.strip() or "http://localhost:11434",
     })
@@ -933,7 +1174,8 @@ def render_settings():
 
     # --- Test connection ---
     with c1:
-        test_target = chosen if chosen in ("gemini", "ollama", "openai", "claude") else "gemini"
+        _testable = ("gemini", "ollama", "openai", "github", "claude")
+        test_target = chosen if chosen in _testable else "gemini"
         if st.button(f"🔌 Test {test_target} connection", use_container_width=True):
             with st.spinner(f"Testing {test_target}…"):
                 provider = build_provider(test_target, new_settings)
